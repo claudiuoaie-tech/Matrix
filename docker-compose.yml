@@ -1,0 +1,31 @@
+# Throwaway PostgreSQL for local Rota-Matrix development & the webhook test harness.
+#
+#   docker compose up -d            # start Postgres in the background
+#   npx prisma migrate dev          # create tables
+#   npm run test:webhook            # run the mock integration harness
+#   docker compose down             # stop (add -v to also wipe the data volume)
+#
+# Credentials below match the default DATABASE_URL in .env / .env.example:
+#   postgresql://postgres:postgres@localhost:5432/rotamatrix?schema=public
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: rota-matrix-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: rotamatrix
+    ports:
+      - "5432:5432"
+    volumes:
+      - rota_matrix_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d rotamatrix"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  rota_matrix_pgdata:

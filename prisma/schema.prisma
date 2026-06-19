@@ -1,0 +1,293 @@
+// Rota-Matrix — Prisma schema
+// Specialized automated temporary worker rota and communications backend.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ----------------------------------------------------------------------------
+// Enums
+// ----------------------------------------------------------------------------
+
+enum WorkerStatus {
+  ACTIVE
+  SUSPENDED
+  INACTIVE
+}
+
+// Pools a worker belongs to. Modelled as an enum so allocation logic can
+// target a specific client's pool of temporary workers.
+enum ClientPool {
+  POOL_A
+  POOL_B
+  POOL_C
+}
+
+enum ClientStatus {
+  ACTIVE
+  ARCHIVED
+}
+
+// Lifecycle of a single worker<->shift allocation.
+enum AllocationState {
+  AVAILABLE
+  PROPOSED
+  CONFIRMED
+  DECLINED
+  TIMEOUT
+}
+
+// The three daily shift slots a worker can be scheduled for.
+enum ShiftSlot {
+  AM
+  PM
+  NIGHT
+}
+
+// Lifecycle of a holiday / absence request.
+enum HolidayStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+// Category of a compliance document stored in a worker's document vault.
+enum DocType {
+  PASSPORT
+  RTW
+  PROOF_OF_ADDRESS
+  OTHER
+}
+
+// Per-day status shown in a cell of the planning board (image-driven spec).
+// SCHEDULED carries a custom start time. Worker self-service can only set the
+// first five; the rest are admin-driven.
+enum RotaStatus {
+  AVAILABLE
+  UNAVAILABLE
+  SICK
+  REST
+  HOLIDAY
+  SCHEDULED
+  CANCELLED
+  NO_SHOW
+  // Worker declined the offered shift via SMS ("2" / "NO").
+  REJECTED
+}
+
+// ----------------------------------------------------------------------------
+// Models
+// ----------------------------------------------------------------------------
+
+model Worker {
+  id            String           @id @default(uuid())
+  name          String
+  phone         String           @unique
+  // Optional contact email. Unique when present (Postgres allows multiple NULLs),
+  // used alongside phone for CSV-import duplicate detection.
+  email         String?          @unique
+  status        WorkerStatus     @default(ACTIVE)
+  clientPool    ClientPool
+  // Right to Work expiry. Null = not recorded. Past = expired (blocks shifts).
+  rtwExpiryDate DateTime?
+  // Free-text competencies (e.g. "Forklift", "Supervisor", "Driver") used to
+  // make shift planning easier. Postgres native text array.
+  skills        String[]         @default([])
+  allocations   Allocation[]
+  availability  Availability[]
+  holidays      HolidayRequest[]
+  sessions      Session[]
+  rotaCells     RotaCell[]
+  documents     WorkerDocument[]
+  createdAt     DateTime         @default(now())
+  updatedAt     DateTime         @updatedAt
+
+  @@index([status])
+  @@map("workers")
+}
+
+// A compliance document uploaded to a worker's profile vault (passport, RTW,
+// proof of address, etc.). The file is stored on disk; filePath is relative to
+// the server's uploads directory.
+model WorkerDocument {
+  id         String   @id @default(uuid())
+  workerId   String
+  worker     Worker   @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  docType    DocType  @default(OTHER)
+  fileName   String
+  filePath   String
+  mimeType   String
+  uploadedAt DateTime @default(now())
+
+  @@index([workerId])
+  @@map("worker_documents")
+}
+
+model Client {
+  id          String          @id @default(uuid())
+  companyName String
+  address     String
+  status      ClientStatus    @default(ACTIVE)
+  // The worker pool this client draws temporary staff from.
+  pool        ClientPool      @default(POOL_A)
+  shifts      Shift[]
+  templates   ShiftTemplate[]
+  rotaCells   RotaCell[]
+  createdAt   DateTime        @default(now())
+  updatedAt   DateTime        @updatedAt
+
+  @@map("clients")
+}
+
+model Shift {
+  id          String       @id @default(uuid())
+  clientId    String
+  client      Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  date        DateTime
+  slot        ShiftSlot    @default(AM)
+  startTime   String
+  endTime     String
+  slotsNeeded Int
+  allocations Allocation[]
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+
+  @@index([clientId])
+  @@index([date])
+  @@map("shifts")
+}
+
+model Allocation {
+  id        String          @id @default(uuid())
+  shiftId   String
+  shift     Shift           @relation(fields: [shiftId], references: [id], onDelete: Cascade)
+  workerId  String
+  worker    Worker          @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  state     AllocationState @default(AVAILABLE)
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  // A worker can only have one allocation row per shift.
+  @@unique([shiftId, workerId])
+  @@index([workerId, state])
+  @@index([shiftId, state])
+  @@map("allocations")
+}
+
+model BroadcastLog {
+  id          String   @id @default(uuid())
+  messageBody String   @db.Text
+  sentAt      DateTime @default(now())
+  // Targeted Worker IDs stored as a JSON array of strings.
+  recipients  Json
+  createdAt   DateTime @default(now())
+
+  @@map("broadcast_logs")
+}
+
+// Weekly recurring availability: one row per (worker, day-of-week, slot) the
+// worker has marked themselves available for. dayOfWeek is 0=Monday..6=Sunday.
+model Availability {
+  id        String    @id @default(uuid())
+  workerId  String
+  worker    Worker    @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  dayOfWeek Int
+  slot      ShiftSlot
+  available Boolean   @default(true)
+  updatedAt DateTime  @updatedAt
+
+  @@unique([workerId, dayOfWeek, slot])
+  @@index([workerId])
+  @@map("availability")
+}
+
+// Holiday / absence request submitted by a worker. While PENDING or APPROVED and
+// overlapping a shift date, the worker is excluded from broadcast suggestions.
+model HolidayRequest {
+  id        String        @id @default(uuid())
+  workerId  String
+  worker    Worker        @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  startDate DateTime
+  endDate   DateTime
+  status    HolidayStatus @default(PENDING)
+  note      String?
+  createdAt DateTime      @default(now())
+  updatedAt DateTime      @updatedAt
+
+  @@index([workerId])
+  @@index([startDate, endDate])
+  @@map("holiday_requests")
+}
+
+// One-time SMS verification code for frictionless OTP login.
+model OtpCode {
+  id        String   @id @default(uuid())
+  phone     String
+  code      String
+  expiresAt DateTime
+  consumed  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([phone])
+  @@map("otp_codes")
+}
+
+// Worker login session. Token is an opaque random string stored client-side.
+model Session {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  workerId  String
+  worker    Worker   @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([workerId])
+  @@map("sessions")
+}
+
+// One cell of the planning board: a worker's status on a single day. Exactly one
+// per (worker, day). startTime is set when status is SCHEDULED. clientId records
+// which client a scheduled/cancelled shift belongs to (for the cancellation SMS).
+model RotaCell {
+  id        String     @id @default(uuid())
+  workerId  String
+  worker    Worker     @relation(fields: [workerId], references: [id], onDelete: Cascade)
+  clientId  String?
+  client    Client?    @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  date      DateTime   @db.Date
+  status    RotaStatus
+  // True once the worker has confirmed a SCHEDULED shift via the SMS / in-app
+  // accept loop. Admin-set shifts start pending (false) until acknowledged.
+  confirmed Boolean    @default(false)
+  // Optional free-text shift name (letters/numbers), e.g. "Early A" or "Reception".
+  label     String?
+  startTime String?
+  endTime   String?
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  @@unique([workerId, date])
+  @@index([date])
+  @@index([clientId, date])
+  @@map("rota_cells")
+}
+
+// A reusable shift pattern for a client (e.g. "Early Shift" 08:00-16:00) that the
+// admin can apply to board cells from a quick-select menu.
+model ShiftTemplate {
+  id        String   @id @default(uuid())
+  clientId  String
+  client    Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  name      String
+  startTime String
+  endTime   String
+  createdAt DateTime @default(now())
+
+  @@index([clientId])
+  @@map("shift_templates")
+}
