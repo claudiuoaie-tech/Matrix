@@ -43,7 +43,7 @@ authRouter.post("/otp/request", async (req: Request, res: Response): Promise<voi
     });
     await sendSms(
       phone,
-      `Your Rota-Matrix login code is ${code}. It expires in 10 minutes.`
+      `Your Matrix login code is ${code}. It expires in 10 minutes.`
     );
     if (EXPOSE_OTP) devCode = code;
   }

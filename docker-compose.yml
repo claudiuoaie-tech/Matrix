@@ -1,4 +1,4 @@
-# Throwaway PostgreSQL for local Rota-Matrix development & the webhook test harness.
+# Throwaway PostgreSQL for local Matrix development & the webhook test harness.
 #
 #   docker compose up -d            # start Postgres in the background
 #   npx prisma migrate dev          # create tables

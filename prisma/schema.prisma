@@ -1,4 +1,4 @@
-// Rota-Matrix — Prisma schema
+// Matrix — Prisma schema
 // Specialized automated temporary worker rota and communications backend.
 
 generator client {

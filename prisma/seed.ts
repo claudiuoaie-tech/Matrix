@@ -1,5 +1,5 @@
 /**
- * Seed demo data for Rota-Matrix.
+ * Seed demo data for Matrix.
  *
  *   npm run seed
  *

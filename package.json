@@ -1,5 +1,5 @@
 {
-  "name": "rota-matrix",
+  "name": "matrix",
   "version": "0.1.0",
   "description": "Specialized automated temporary worker rota and communications backend",
   "main": "dist/index.js",

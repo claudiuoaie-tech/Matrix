@@ -19,7 +19,7 @@ app.use(express.urlencoded({ extended: false }));
 app.use(express.json({ limit: "25mb" }));
 
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok", service: "rota-matrix" });
+  res.json({ status: "ok", service: "matrix" });
 });
 
 app.use("/api/webhooks", webhooksRouter);
@@ -34,7 +34,7 @@ const PORT = Number(process.env.PORT ?? 3000);
 // should not bind a port.
 if (require.main === module) {
   app.listen(PORT, () => {
-    console.log(`Rota-Matrix backend listening on port ${PORT}`);
+    console.log(`Matrix backend listening on port ${PORT}`);
   });
   // Daily Right to Work expiry sweep → high-priority admin email alerts.
   startRtwScheduler();

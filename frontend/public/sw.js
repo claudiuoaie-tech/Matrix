@@ -1,4 +1,4 @@
-// Rota-Matrix service worker.
+// Matrix service worker.
 //
 // Strategy:
 //  - App shell is precached on install so the PWA opens offline.
@@ -9,9 +9,9 @@
 //  - API traffic (cross-origin to the Express backend) is never touched, so rota
 //    data is always live and never served stale.
 
-const VERSION = "v2";
-const SHELL_CACHE = `rota-matrix-shell-${VERSION}`;
-const RUNTIME_CACHE = `rota-matrix-runtime-${VERSION}`;
+const VERSION = "v3";
+const SHELL_CACHE = `matrix-shell-${VERSION}`;
+const RUNTIME_CACHE = `matrix-runtime-${VERSION}`;
 const OFFLINE_URL = "/";
 
 // Precached on install. Wrapped individually so one missing asset can't abort
@@ -82,7 +82,7 @@ async function networkFirstNavigation(req) {
     const cached = (await cache.match(req)) || (await caches.match(OFFLINE_URL));
     if (cached) return cached;
     return new Response(
-      "<h1>You're offline</h1><p>Reconnect to load Rota-Matrix.</p>",
+      "<h1>You're offline</h1><p>Reconnect to load Matrix.</p>",
       { headers: { "Content-Type": "text/html" }, status: 503 }
     );
   }

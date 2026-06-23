@@ -14,13 +14,13 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Rota-Matrix",
+  title: "Matrix",
   description: "Temporary worker rota and shift communications portal",
   manifest: "/manifest.json",
   appleWebApp: {
     capable: true,
     statusBarStyle: "default",
-    title: "Rota-Matrix",
+    title: "Matrix",
   },
   icons: {
     icon: "/icon.svg",

@@ -9,7 +9,7 @@ export default function Home() {
           <div className="grid place-items-center w-11 h-11 rounded-xl bg-brand text-white">
             <CalendarDays size={24} />
           </div>
-          <h1 className="text-3xl font-bold tracking-tight">Rota-Matrix</h1>
+          <h1 className="text-3xl font-bold tracking-tight">Matrix</h1>
         </div>
         <p className="text-center text-muted mb-10">
           Temporary worker rota &amp; shift communications. Choose a view to get

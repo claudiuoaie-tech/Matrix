@@ -1,4 +1,4 @@
-# Rota-Matrix
+# Matrix
 
 Specialized automated temporary-worker rota and communications backend.
 Node.js + Express + TypeScript, Prisma ORM over PostgreSQL, Twilio for SMS.

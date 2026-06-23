@@ -1,7 +1,7 @@
-# Rota-Matrix — Frontend PWA
+# Matrix — Frontend PWA
 
 Next.js 16 (App Router) + Tailwind CSS v4 + lucide-react. Installable PWA that
-talks to the Rota-Matrix Express backend.
+talks to the Matrix Express backend.
 
 ## Run
 
@@ -42,7 +42,7 @@ Live/Offline indicator for the stream.
 ```
 app/                       Routes (App Router)
 components/                StatusBadge, ServiceWorkerRegister
-components/admin/          RotaMatrix, WorkersManager, BroadcastEngine
+components/admin/          BoardGrid, WorkersManager, BroadcastEngine
 lib/api.ts                 Typed API client
 lib/session.ts             localStorage session cache
 lib/useRotaEvents.ts       SSE hook

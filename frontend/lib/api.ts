@@ -1,4 +1,4 @@
-// Typed client for the Rota-Matrix Express API.
+// Typed client for the Matrix Express API.
 
 import { getToken } from "./session";
 import { getAdminKey } from "./adminSession";

@@ -3,11 +3,11 @@
 // without real credentials — mirroring the Twilio SMS helper.
 
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
-const EMAIL_FROM = process.env.EMAIL_FROM ?? "Rota-Matrix <alerts@rota-matrix.local>";
+const EMAIL_FROM = process.env.EMAIL_FROM ?? "Matrix <alerts@matrix.local>";
 
 /** Where compliance/admin alerts are sent. */
 export const ADMIN_ALERT_EMAIL =
-  process.env.ADMIN_ALERT_EMAIL ?? "admin@rota-matrix.local";
+  process.env.ADMIN_ALERT_EMAIL ?? "admin@matrix.local";
 
 const configured =
   !!RESEND_API_KEY &&

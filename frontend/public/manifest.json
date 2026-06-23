@@ -1,6 +1,6 @@
 {
-  "name": "Rota-Matrix",
-  "short_name": "Rota-Matrix",
+  "name": "Matrix",
+  "short_name": "Matrix",
   "description": "Temporary worker rota and shift communications portal",
   "start_url": "/",
   "display": "standalone",
