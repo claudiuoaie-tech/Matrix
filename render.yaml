@@ -61,12 +61,13 @@ services:
     plan: free
     rootDir: frontend
     autoDeploy: true
+    healthCheckPath: /
     buildCommand: npm install --include=dev && npm run build
     startCommand: npm start
     envVars:
       - key: NODE_ENV
         value: production
       # Inlined at build time — must point at the deployed API, e.g.
-      # https://matrix-api.onrender.com
+      # https://matrix-qxs1.onrender.com  (no trailing slash)
       - key: NEXT_PUBLIC_API_URL
         sync: false
