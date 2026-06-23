@@ -5,6 +5,15 @@ const authToken = process.env.TWILIO_AUTH_TOKEN;
 
 export const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER ?? "";
 
+// WhatsApp sender. Falls back to the SMS number if a WhatsApp-specific sender
+// isn't configured (some setups enable WhatsApp on the same number, or use the
+// Twilio sandbox number during testing).
+export const TWILIO_WHATSAPP_FROM =
+  process.env.TWILIO_WHATSAPP_FROM ?? TWILIO_FROM_NUMBER;
+
+/** Outbound channels a message can be dispatched on. */
+export type SendChannel = "SMS" | "WHATSAPP";
+
 /**
  * Whether real Twilio credentials are configured. The .env.example ships with
  * obvious placeholders ("ACxxxx...", "your_auth_token_here"); we treat those as
@@ -42,4 +51,40 @@ export async function sendSms(to: string, body: string): Promise<void> {
   } catch (err) {
     console.error(`[sms] failed to send to ${to}:`, err);
   }
+}
+
+/** Normalise an address to a WhatsApp endpoint ("whatsapp:+44…"). */
+function toWhatsApp(addr: string): string {
+  return `whatsapp:${addr.trim().replace(/^whatsapp:/i, "")}`;
+}
+
+/**
+ * Send a WhatsApp message via Twilio. Mirrors sendSms: mock-logs when creds /
+ * sender aren't configured, and swallows send failures so one bad recipient
+ * can't abort a bulk broadcast.
+ */
+export async function sendWhatsApp(to: string, body: string): Promise<void> {
+  if (!twilioClient || !TWILIO_WHATSAPP_FROM) {
+    console.log(`[whatsapp:mock] -> ${to}: ${body}`);
+    return;
+  }
+
+  try {
+    await twilioClient.messages.create({
+      to: toWhatsApp(to),
+      from: toWhatsApp(TWILIO_WHATSAPP_FROM),
+      body,
+    });
+  } catch (err) {
+    console.error(`[whatsapp] failed to send to ${to}:`, err);
+  }
+}
+
+/** Dispatch a message on the chosen channel (SMS by default). */
+export async function sendMessage(
+  to: string,
+  body: string,
+  channel: SendChannel = "SMS"
+): Promise<void> {
+  return channel === "WHATSAPP" ? sendWhatsApp(to, body) : sendSms(to, body);
 }

@@ -223,10 +223,15 @@ export const admin = {
       { admin: true }
     );
   },
-  broadcast: (messageBody: string, workerIds: string[], shiftId?: string) =>
-    request<{ ok: boolean; broadcastId: string; sent: number; proposed: number }>(
+  broadcast: (
+    messageBody: string,
+    workerIds: string[],
+    shiftId?: string,
+    channel: "SMS" | "WHATSAPP" = "SMS"
+  ) =>
+    request<{ ok: boolean; broadcastId: string; sent: number; proposed: number; channel: string }>(
       "/api/admin/broadcast",
-      { method: "POST", admin: true, body: { messageBody, workerIds, shiftId } }
+      { method: "POST", admin: true, body: { messageBody, workerIds, shiftId, channel } }
     ),
   // ---- Live Inbox ----
   messages: (limit?: number) =>

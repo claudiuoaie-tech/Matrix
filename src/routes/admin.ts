@@ -4,7 +4,7 @@ import path from "path";
 import { randomUUID } from "crypto";
 import type { ClientPool, RotaStatus, DocType } from "@prisma/client";
 import { prisma } from "../lib/prisma";
-import { sendSms } from "../lib/twilio";
+import { sendSms, sendMessage } from "../lib/twilio";
 import { bus, emitRotaEvent, RotaEvent } from "../lib/events";
 import { revokeSessions } from "../lib/auth";
 import { requireAdmin } from "../lib/adminAuth";
@@ -799,6 +799,7 @@ adminRouter.post("/broadcast", async (req: Request, res: Response): Promise<void
     ? req.body.workerIds.map(String)
     : [];
   const shiftId = req.body?.shiftId ? String(req.body.shiftId) : undefined;
+  const channel = req.body?.channel === "WHATSAPP" ? "WHATSAPP" : "SMS";
 
   if (!messageBody) {
     res.status(400).json({ error: "messageBody is required" });
@@ -813,8 +814,8 @@ adminRouter.post("/broadcast", async (req: Request, res: Response): Promise<void
     where: { id: { in: workerIds }, status: "ACTIVE" },
   });
 
-  // Dispatch SMS to every recipient.
-  await Promise.all(workers.map((w) => sendSms(w.phone, messageBody)));
+  // Dispatch to every recipient on the chosen channel (SMS or WhatsApp).
+  await Promise.all(workers.map((w) => sendMessage(w.phone, messageBody, channel)));
 
   // Optionally seed PROPOSED allocations for a specific shift.
   let proposed = 0;
@@ -850,6 +851,7 @@ adminRouter.post("/broadcast", async (req: Request, res: Response): Promise<void
     broadcastId: log.id,
     sent: workers.length,
     proposed,
+    channel,
   });
 });
 

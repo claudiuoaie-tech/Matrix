@@ -153,6 +153,7 @@ function BroadcastComposer() {
   );
   const [shifts, setShifts] = useState<ShiftOption[]>([]);
   const [shiftId, setShiftId] = useState("");
+  const [channel, setChannel] = useState<"SMS" | "WHATSAPP">("SMS");
 
   // Step 2 — recipients
   const [clients, setClients] = useState<ClientLite[]>([]);
@@ -341,10 +342,11 @@ function BroadcastComposer() {
     setSending(true);
     setResult(null);
     try {
-      const res = await admin.broadcast(message, [...selected], shiftId || undefined);
+      const res = await admin.broadcast(message, [...selected], shiftId || undefined, channel);
       setResult(
-        `Sent to ${res.sent} worker${res.sent === 1 ? "" : "s"}` +
-          (res.proposed ? ` · ${res.proposed} proposed allocation(s) created` : "")
+        `Sent to ${res.sent} worker${res.sent === 1 ? "" : "s"} via ${
+          channel === "WHATSAPP" ? "WhatsApp" : "SMS"
+        }` + (res.proposed ? ` · ${res.proposed} proposed allocation(s) created` : "")
       );
       setSelected(new Set());
     } catch (err) {
@@ -378,6 +380,33 @@ function BroadcastComposer() {
             placeholder="Type your broadcast…"
           />
           <p className="mt-1 text-xs text-muted">{message.length} characters</p>
+
+          {/* Channel selector */}
+          <div className="mt-4">
+            <label className="mb-1 block text-xs font-medium text-muted">Send via</label>
+            <div className="inline-flex rounded-lg border border-border p-0.5">
+              <button
+                type="button"
+                onClick={() => setChannel("SMS")}
+                className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition ${
+                  channel === "SMS" ? "bg-brand text-white" : "text-muted hover:text-foreground"
+                }`}
+              >
+                <MessageSquare size={15} /> SMS
+              </button>
+              <button
+                type="button"
+                onClick={() => setChannel("WHATSAPP")}
+                className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition ${
+                  channel === "WHATSAPP"
+                    ? "bg-emerald-600 text-white"
+                    : "text-muted hover:text-foreground"
+                }`}
+              >
+                <MessageCircle size={15} /> WhatsApp
+              </button>
+            </div>
+          </div>
 
           <div className="mt-4">
             <label className="mb-1 block text-xs font-medium text-muted">
