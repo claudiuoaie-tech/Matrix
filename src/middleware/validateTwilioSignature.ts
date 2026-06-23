@@ -37,9 +37,11 @@ export function validateTwilioSignature(
   const signature = req.header("X-Twilio-Signature") ?? "";
 
   // Reconstruct the exact public URL Twilio used to reach us. Behind a proxy the
-  // host/proto headers matter, so prefer an explicitly configured base URL.
+  // host/proto headers matter, so prefer an explicitly configured base URL, then
+  // Render's injected external URL, then fall back to the request headers.
   const base =
     process.env.PUBLIC_BASE_URL ??
+    process.env.RENDER_EXTERNAL_URL ??
     `${req.protocol}://${req.get("host") ?? ""}`;
   const url = `${base}${req.originalUrl}`;
 

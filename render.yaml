@@ -1,0 +1,72 @@
+# Render Blueprint for Matrix — https://render.com/docs/blueprint-spec
+#
+# The PostgreSQL database is external (DigitalOcean Managed Postgres), so it is
+# intentionally NOT defined here. Set DATABASE_URL in the Render dashboard.
+#
+# Env vars marked `sync: false` must be filled in once in the dashboard; the two
+# API keys are auto-generated as strong secrets on first deploy (reveal them in
+# the dashboard to use the admin console / external gateway).
+
+services:
+  # --------------------------------------------------------------------------
+  # Backend API — Express + Prisma
+  # --------------------------------------------------------------------------
+  - type: web
+    name: matrix-api
+    runtime: node
+    plan: free
+    rootDir: .
+    autoDeploy: true
+    healthCheckPath: /health
+    # --include=dev forces build tools (typescript, prisma) to install even with
+    # NODE_ENV=production, which otherwise skips devDependencies.
+    buildCommand: npm install --include=dev && npx prisma generate && npm run build
+    # Apply migrations before the new version goes live (creates tables on a fresh DB).
+    preDeployCommand: npx prisma migrate deploy
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false # DigitalOcean Managed Postgres connection string
+      - key: ADMIN_API_KEY
+        generateValue: true
+      - key: EXTERNAL_API_KEY
+        generateValue: true
+      - key: VALIDATE_TWILIO_SIGNATURE
+        value: "true"
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_FROM_NUMBER
+        sync: false # the Matrix number, e.g. +447366185883
+      - key: ADMIN_ALERT_EMAIL
+        sync: false
+      - key: EMAIL_FROM
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: OUTBOUND_WEBHOOK_URL
+        sync: false
+      # PUBLIC_BASE_URL is optional on Render: the Twilio signature check falls
+      # back to RENDER_EXTERNAL_URL automatically. Set it only for a custom domain.
+
+  # --------------------------------------------------------------------------
+  # Frontend PWA — Next.js
+  # --------------------------------------------------------------------------
+  - type: web
+    name: matrix-web
+    runtime: node
+    plan: free
+    rootDir: frontend
+    autoDeploy: true
+    buildCommand: npm install --include=dev && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      # Inlined at build time — must point at the deployed API, e.g.
+      # https://matrix-api.onrender.com
+      - key: NEXT_PUBLIC_API_URL
+        sync: false
