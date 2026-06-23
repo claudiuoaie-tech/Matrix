@@ -13,6 +13,7 @@
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
     "seed": "ts-node prisma/seed.ts",
+    "seed:prod": "ts-node prisma/seedProd.ts",
     "test:webhook": "ts-node tests/twilioWebhook.mock.ts"
   },
   "keywords": [

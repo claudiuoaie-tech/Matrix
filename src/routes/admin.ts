@@ -11,6 +11,7 @@ import { requireAdmin } from "../lib/adminAuth";
 import { isRtwExpired } from "../lib/rtw";
 import { parseCsv, buildCsv, parseFlexibleDate } from "../lib/csv";
 import { fireWebhook } from "../services/webhook.service";
+import { seedDemoData } from "../lib/seedDemo";
 import {
   mondayKey,
   windowKeys,
@@ -853,6 +854,20 @@ adminRouter.post("/broadcast", async (req: Request, res: Response): Promise<void
     proposed,
     channel,
   });
+});
+
+// ----------------------------------------------------------------------------
+// Demo seed (idempotent, safe for production)
+// ----------------------------------------------------------------------------
+
+/**
+ * POST /api/admin/seed — populate demo data, but ONLY when the database is empty
+ * (never deletes existing data). Lets an operator seed a fresh deployment without
+ * shell access. Returns 200 with a skip message if data already exists.
+ */
+adminRouter.post("/seed", async (_req: Request, res: Response): Promise<void> => {
+  const result = await seedDemoData();
+  res.status(result.seeded ? 201 : 200).json(result);
 });
 
 // ----------------------------------------------------------------------------
