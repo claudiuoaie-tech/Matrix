@@ -854,6 +854,52 @@ adminRouter.post("/broadcast", async (req: Request, res: Response): Promise<void
 });
 
 // ----------------------------------------------------------------------------
+// Live Inbox — inbound SMS / WhatsApp messages
+// ----------------------------------------------------------------------------
+
+/**
+ * GET /api/admin/messages?limit=100
+ * Recent inbound messages, newest first, with the matched worker's name resolved.
+ */
+adminRouter.get("/messages", async (req: Request, res: Response): Promise<void> => {
+  const limitRaw = Number(req.query.limit);
+  const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 500) : 100;
+
+  const messages = await prisma.incomingMessage.findMany({
+    orderBy: { receivedAt: "desc" },
+    take: limit,
+    include: { worker: { select: { name: true } } },
+  });
+
+  const unread = await prisma.incomingMessage.count({ where: { isRead: false } });
+
+  res.json({
+    unread,
+    messages: messages.map((m) => ({
+      id: m.id,
+      fromNumber: m.fromNumber,
+      messageBody: m.messageBody,
+      channel: m.channel,
+      receivedAt: m.receivedAt.toISOString(),
+      isRead: m.isRead,
+      workerName: m.worker?.name ?? null,
+    })),
+  });
+});
+
+/** POST /api/admin/messages/read-all — mark every inbound message as read. */
+adminRouter.post(
+  "/messages/read-all",
+  async (_req: Request, res: Response): Promise<void> => {
+    const result = await prisma.incomingMessage.updateMany({
+      where: { isRead: false },
+      data: { isRead: true },
+    });
+    res.json({ ok: true, updated: result.count });
+  }
+);
+
+// ----------------------------------------------------------------------------
 // Clients (for the board filter dropdown)
 // ----------------------------------------------------------------------------
 

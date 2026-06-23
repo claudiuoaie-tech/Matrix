@@ -63,6 +63,23 @@ export interface ScheduleEntry {
   };
 }
 
+export type MessageChannel = "SMS" | "WHATSAPP";
+
+export interface IncomingMessage {
+  id: string;
+  fromNumber: string;
+  messageBody: string;
+  channel: MessageChannel;
+  receivedAt: string;
+  isRead: boolean;
+  workerName: string | null;
+}
+
+export interface InboxResponse {
+  unread: number;
+  messages: IncomingMessage[];
+}
+
 export interface WorkerShift {
   id: string;
   date: string; // YYYY-MM-DD
@@ -194,6 +211,7 @@ export interface RotaEvent {
     | "broadcast.sent"
     | "availability.updated"
     | "holiday.created"
-    | "board.updated";
+    | "board.updated"
+    | "message.received";
   payload: Record<string, unknown>;
 }

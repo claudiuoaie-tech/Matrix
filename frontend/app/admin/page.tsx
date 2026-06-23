@@ -207,7 +207,7 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
 
       {tab === "rota" && <BoardGrid lastEvent={lastEvent} />}
       {tab === "workers" && <WorkersManager />}
-      {tab === "broadcast" && <BroadcastEngine />}
+      {tab === "broadcast" && <BroadcastEngine lastEvent={lastEvent} />}
     </main>
   );
 }

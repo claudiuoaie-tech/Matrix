@@ -64,6 +64,12 @@ enum DocType {
   OTHER
 }
 
+// Channel an inbound message arrived on.
+enum MessageChannel {
+  SMS
+  WHATSAPP
+}
+
 // Per-day status shown in a cell of the planning board (image-driven spec).
 // SCHEDULED carries a custom start time. Worker self-service can only set the
 // first five; the rest are admin-driven.
@@ -104,11 +110,31 @@ model Worker {
   sessions      Session[]
   rotaCells     RotaCell[]
   documents     WorkerDocument[]
+  messages      IncomingMessage[]
   createdAt     DateTime         @default(now())
   updatedAt     DateTime         @updatedAt
 
   @@index([status])
   @@map("workers")
+}
+
+// An inbound SMS / WhatsApp message captured by the webhook, logged for the
+// admin "Live Inbox" regardless of whether it matched an automated command.
+// workerId is linked when the sender's number matches a Worker (SetNull on
+// delete so the message survives as a raw-number entry).
+model IncomingMessage {
+  id          String         @id @default(uuid())
+  fromNumber  String
+  messageBody String         @db.Text
+  channel     MessageChannel @default(SMS)
+  workerId    String?
+  worker      Worker?        @relation(fields: [workerId], references: [id], onDelete: SetNull)
+  receivedAt  DateTime       @default(now())
+  isRead      Boolean        @default(false)
+
+  @@index([receivedAt])
+  @@index([workerId])
+  @@map("incoming_messages")
 }
 
 // A compliance document uploaded to a worker's profile vault (passport, RTW,

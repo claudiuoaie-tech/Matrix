@@ -10,6 +10,7 @@ import type {
   ClientPool,
   HolidayRequest,
   ImportSummary,
+  InboxResponse,
   RecipientCandidate,
   RotaResponse,
   RotaStatus,
@@ -227,6 +228,18 @@ export const admin = {
       "/api/admin/broadcast",
       { method: "POST", admin: true, body: { messageBody, workerIds, shiftId } }
     ),
+  // ---- Live Inbox ----
+  messages: (limit?: number) =>
+    request<InboxResponse>(
+      `/api/admin/messages${limit ? `?limit=${limit}` : ""}`,
+      { admin: true }
+    ),
+  markAllMessagesRead: () =>
+    request<{ ok: boolean; updated: number }>("/api/admin/messages/read-all", {
+      method: "POST",
+      admin: true,
+    }),
+
   // EventSource cannot set headers, so the admin key rides as a query param.
   eventsUrl: () => {
     const key = getAdminKey();

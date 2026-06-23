@@ -12,9 +12,19 @@ import {
   ArrowLeft,
   Building2,
   ChevronDown,
+  Radio,
+  Inbox,
+  MessageSquare,
+  MessageCircle,
 } from "lucide-react";
 import { admin } from "@/lib/api";
-import type { BoardCell, ClientLite, RecipientCandidate } from "@/lib/types";
+import type {
+  BoardCell,
+  ClientLite,
+  IncomingMessage,
+  RecipientCandidate,
+  RotaEvent,
+} from "@/lib/types";
 import { POOL_LABELS, SLOT_LABELS, formatDate } from "@/lib/ui";
 import { STATUS_STYLES, cellText } from "@/lib/boardUi";
 
@@ -30,7 +40,111 @@ interface ClientGroup {
   workers: RecipientCandidate[];
 }
 
-export default function BroadcastEngine() {
+export default function BroadcastEngine({ lastEvent }: { lastEvent: RotaEvent | null }) {
+  const [view, setView] = useState<"broadcast" | "inbox">("broadcast");
+  const [messages, setMessages] = useState<IncomingMessage[]>([]);
+  const [unread, setUnread] = useState(0);
+  const [loadingInbox, setLoadingInbox] = useState(true);
+  const [marking, setMarking] = useState(false);
+
+  const loadInbox = useCallback(() => {
+    admin
+      .messages(200)
+      .then((r) => {
+        setMessages(r.messages);
+        setUnread(r.unread);
+      })
+      .finally(() => setLoadingInbox(false));
+  }, []);
+
+  useEffect(loadInbox, [loadInbox]);
+
+  // Live: a new inbound message arrived over SSE — refresh the feed.
+  useEffect(() => {
+    if (lastEvent?.type === "message.received") loadInbox();
+  }, [lastEvent, loadInbox]);
+
+  async function markAll() {
+    setMarking(true);
+    try {
+      await admin.markAllMessagesRead();
+      setMessages((prev) => prev.map((m) => ({ ...m, isRead: true })));
+      setUnread(0);
+    } finally {
+      setMarking(false);
+    }
+  }
+
+  return (
+    <div className="mx-auto max-w-3xl space-y-4">
+      {/* View switch: Broadcast composer vs. Live Inbox */}
+      <div className="flex gap-1.5 rounded-2xl border border-border bg-card p-1.5">
+        <ViewTab
+          active={view === "broadcast"}
+          onClick={() => setView("broadcast")}
+          icon={<Radio size={15} />}
+          label="Broadcast"
+        />
+        <ViewTab
+          active={view === "inbox"}
+          onClick={() => setView("inbox")}
+          icon={<Inbox size={15} />}
+          label="Live Inbox"
+          badge={unread}
+        />
+      </div>
+
+      {view === "broadcast" ? (
+        <BroadcastComposer />
+      ) : (
+        <InboxPane
+          messages={messages}
+          loading={loadingInbox}
+          unread={unread}
+          marking={marking}
+          onMarkAll={markAll}
+        />
+      )}
+    </div>
+  );
+}
+
+function ViewTab({
+  active,
+  onClick,
+  icon,
+  label,
+  badge,
+}: {
+  active: boolean;
+  onClick: () => void;
+  icon: React.ReactNode;
+  label: string;
+  badge?: number;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`relative inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl px-3 py-2 text-sm font-medium transition ${
+        active ? "bg-brand text-white" : "text-muted hover:text-foreground"
+      }`}
+    >
+      {icon}
+      {label}
+      {badge ? (
+        <span
+          className={`ml-1 grid min-w-[18px] place-items-center rounded-full px-1 text-[10px] font-bold ${
+            active ? "bg-white/25 text-white" : "bg-rose-500 text-white"
+          }`}
+        >
+          {badge}
+        </span>
+      ) : null}
+    </button>
+  );
+}
+
+function BroadcastComposer() {
   const [step, setStep] = useState<1 | 2>(1);
 
   // Step 1 — compose
@@ -241,7 +355,7 @@ export default function BroadcastEngine() {
   }
 
   return (
-    <div className="mx-auto max-w-3xl space-y-4">
+    <div className="space-y-4">
       {/* Stepper header */}
       <div className="flex items-center gap-3 rounded-2xl border border-border bg-card p-3">
         <Step n={1} label="Compose" active={step === 1} done={step > 1} />
@@ -528,4 +642,126 @@ function Step({
       </span>
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// Live Inbox pane
+// ---------------------------------------------------------------------------
+
+function InboxPane({
+  messages,
+  loading,
+  unread,
+  marking,
+  onMarkAll,
+}: {
+  messages: IncomingMessage[];
+  loading: boolean;
+  unread: number;
+  marking: boolean;
+  onMarkAll: () => void;
+}) {
+  return (
+    <section className="rounded-2xl border border-border bg-card">
+      <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
+        <div>
+          <h3 className="font-semibold">Live Inbox</h3>
+          <p className="text-xs text-muted">
+            {messages.length} message{messages.length === 1 ? "" : "s"}
+            {unread > 0 ? ` · ${unread} unread` : ""}
+          </p>
+        </div>
+        <button
+          onClick={onMarkAll}
+          disabled={marking || unread === 0}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-white px-3 py-1.5 text-xs font-medium hover:bg-slate-50 disabled:opacity-50"
+        >
+          {marking ? <Loader2 size={14} className="animate-spin" /> : <CheckCheck size={14} />}
+          Mark all as read
+        </button>
+      </div>
+
+      <div className="max-h-[28rem] overflow-y-auto thin-scroll">
+        {loading ? (
+          <div className="grid place-items-center py-12">
+            <Loader2 className="animate-spin text-muted" />
+          </div>
+        ) : messages.length === 0 ? (
+          <div className="px-4 py-12 text-center text-sm text-muted">
+            <Inbox size={28} className="mx-auto mb-2 text-slate-300" />
+            No messages yet. Inbound texts appear here in real time.
+          </div>
+        ) : (
+          <ul className="divide-y divide-border">
+            {messages.map((m) => (
+              <MessageCard key={m.id} m={m} />
+            ))}
+          </ul>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function MessageCard({ m }: { m: IncomingMessage }) {
+  const known = !!m.workerName;
+  return (
+    <li className={`flex gap-3 px-4 py-3 transition-colors ${m.isRead ? "" : "bg-indigo-50/40"}`}>
+      {/* Fixed-width unread marker column keeps read/unread rows aligned. */}
+      <span className="mt-1.5 flex h-2 w-2 shrink-0">
+        {!m.isRead && <span className="h-2 w-2 rounded-full bg-brand" title="Unread" />}
+      </span>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <span
+            className={`truncate text-sm ${
+              known ? "font-bold text-foreground" : "font-mono text-foreground"
+            }`}
+          >
+            {known ? m.workerName : m.fromNumber}
+          </span>
+          <ChannelBadge channel={m.channel} />
+          <span className="ml-auto shrink-0 text-[11px] text-muted">
+            {relativeTime(m.receivedAt)}
+          </span>
+        </div>
+        {known && <p className="font-mono text-[11px] text-muted">{m.fromNumber}</p>}
+        <p className="mt-1 whitespace-pre-wrap break-words text-sm text-foreground">
+          {m.messageBody}
+        </p>
+      </div>
+    </li>
+  );
+}
+
+function ChannelBadge({ channel }: { channel: IncomingMessage["channel"] }) {
+  if (channel === "WHATSAPP") {
+    return (
+      <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-50 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
+        <MessageCircle size={11} /> WhatsApp
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-sky-50 px-1.5 py-0.5 text-[10px] font-semibold text-sky-700">
+      <MessageSquare size={11} /> SMS
+    </span>
+  );
+}
+
+/** Relative time: "Just now", "5m ago", "3h ago", else "23 Jun, 12:40". */
+function relativeTime(iso: string): string {
+  const then = new Date(iso).getTime();
+  const secs = Math.max(0, Math.floor((Date.now() - then) / 1000));
+  if (secs < 45) return "Just now";
+  const mins = Math.floor(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return new Date(iso).toLocaleString(undefined, {
+    day: "numeric",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }

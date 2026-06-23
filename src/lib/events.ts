@@ -16,7 +16,8 @@ export type RotaEventType =
   | "broadcast.sent"
   | "availability.updated"
   | "holiday.created"
-  | "board.updated";
+  | "board.updated"
+  | "message.received";
 
 export interface RotaEvent {
   type: RotaEventType;

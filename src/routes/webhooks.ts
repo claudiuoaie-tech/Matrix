@@ -1,8 +1,10 @@
 import { Router, Request, Response } from "express";
 import twilio from "twilio";
+import type { MessageChannel } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { validateTwilioSignature } from "../middleware/validateTwilioSignature";
 import { acceptAllocation, declineAllocation } from "../lib/allocations";
+import { emitRotaEvent } from "../lib/events";
 
 export const webhooksRouter = Router();
 
@@ -14,6 +16,50 @@ const { MessagingResponse } = twilio.twiml;
  */
 function normalisePhone(raw: string): string {
   return raw.trim().replace(/\s+/g, "");
+}
+
+/**
+ * Parse Twilio's `From` into a channel + bare E.164 number. WhatsApp arrives
+ * prefixed ("whatsapp:+447700900123"); SMS arrives as a plain number.
+ */
+function parseSender(raw: string): { channel: MessageChannel; number: string } {
+  const t = raw.trim();
+  if (/^whatsapp:/i.test(t)) {
+    return { channel: "WHATSAPP", number: normalisePhone(t.replace(/^whatsapp:/i, "")) };
+  }
+  return { channel: "SMS", number: normalisePhone(t) };
+}
+
+/**
+ * Persist an inbound message to the Live Inbox and push a real-time event to
+ * connected admin dashboards. Best-effort: a logging failure must never block
+ * the worker's reply, so errors are swallowed.
+ */
+async function logIncoming(
+  fromNumber: string,
+  messageBody: string,
+  channel: MessageChannel,
+  worker: { id: string; name: string } | null
+): Promise<void> {
+  try {
+    const msg = await prisma.incomingMessage.create({
+      data: { fromNumber, messageBody, channel, workerId: worker?.id ?? null },
+    });
+    emitRotaEvent({
+      type: "message.received",
+      payload: {
+        id: msg.id,
+        fromNumber: msg.fromNumber,
+        messageBody: msg.messageBody,
+        channel: msg.channel,
+        receivedAt: msg.receivedAt.toISOString(),
+        isRead: msg.isRead,
+        workerName: worker?.name ?? null,
+      },
+    });
+  } catch (err) {
+    console.error("[inbox] failed to log inbound message:", err);
+  }
 }
 
 /** True if the reply contains an accept signal: a standalone "1" or "YES". */
@@ -51,7 +97,7 @@ webhooksRouter.post(
   validateTwilioSignature,
   async (req: Request, res: Response): Promise<void> => {
     try {
-      const from = normalisePhone(String(req.body?.From ?? ""));
+      const { channel, number: from } = parseSender(String(req.body?.From ?? ""));
       const body = String(req.body?.Body ?? "").trim();
 
       if (!from) {
@@ -63,6 +109,11 @@ webhooksRouter.post(
       const worker = await prisma.worker.findUnique({
         where: { phone: from },
       });
+
+      // Log EVERY inbound message to the Live Inbox first — whether or not it
+      // matches a worker or an automated command — then carry on with the
+      // scheduling flow below.
+      await logIncoming(from, body, channel, worker ? { id: worker.id, name: worker.name } : null);
 
       // Unknown sender, or worker not eligible to respond -> safe no-op.
       if (!worker || worker.status === "INACTIVE" || worker.status === "SUSPENDED") {
