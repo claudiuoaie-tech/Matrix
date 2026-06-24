@@ -26,11 +26,12 @@ app.use(
           origin(origin, callback) {
             // Allow non-browser clients (curl, Twilio webhooks, server-to-server)
             // that send no Origin header, plus any explicitly allowlisted origin.
-            if (!origin || corsAllowlist.includes(origin)) {
-              callback(null, true);
-              return;
-            }
-            callback(new Error(`Origin ${origin} not allowed by CORS`));
+            // Deny everything else quietly: callback(null, false) omits the
+            // Access-Control-Allow-Origin header so the browser blocks the
+            // request, without throwing (which would log a stack trace per call
+            // and return a 500 instead of a clean CORS denial).
+            const allowed = !origin || corsAllowlist.includes(origin);
+            callback(null, allowed);
           },
         }
   )
