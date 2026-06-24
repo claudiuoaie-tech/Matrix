@@ -10,7 +10,31 @@ import { startRtwScheduler } from "./lib/rtw";
 
 export const app = express();
 
-app.use(cors());
+// CORS allowlist. Set CORS_ORIGIN to a comma-separated list of allowed origins
+// in production (e.g. "https://matrix-web-di5w.onrender.com"). When unset — as in
+// local development — all origins are allowed so the dev frontend just works.
+const corsAllowlist = (process.env.CORS_ORIGIN ?? "")
+  .split(",")
+  .map((o) => o.trim())
+  .filter(Boolean);
+
+app.use(
+  cors(
+    corsAllowlist.length === 0
+      ? undefined // no allowlist configured → permissive (local dev)
+      : {
+          origin(origin, callback) {
+            // Allow non-browser clients (curl, Twilio webhooks, server-to-server)
+            // that send no Origin header, plus any explicitly allowlisted origin.
+            if (!origin || corsAllowlist.includes(origin)) {
+              callback(null, true);
+              return;
+            }
+            callback(new Error(`Origin ${origin} not allowed by CORS`));
+          },
+        }
+  )
+);
 
 // Twilio posts application/x-www-form-urlencoded bodies. JSON is enabled too so
 // the frontend and mock test harness can post either format. The larger JSON

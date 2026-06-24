@@ -35,6 +35,8 @@ services:
         generateValue: true
       - key: VALIDATE_TWILIO_SIGNATURE
         value: "true"
+      - key: CORS_ORIGIN
+        sync: false # the frontend origin, e.g. https://matrix-web-di5w.onrender.com
       - key: TWILIO_ACCOUNT_SID
         sync: false
       - key: TWILIO_AUTH_TOKEN
