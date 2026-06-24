@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
 import {
   LayoutGrid,
@@ -13,7 +13,8 @@ import {
   ShieldCheck,
   Loader2,
 } from "lucide-react";
-import { auth, ApiError } from "@/lib/api";
+import { auth, admin, ApiError } from "@/lib/api";
+import type { IncomingMessage } from "@/lib/types";
 import { getAdminKey, setAdminKey, clearAdminKey } from "@/lib/adminSession";
 import { useRotaEvents } from "@/lib/useRotaEvents";
 import BoardGrid from "@/components/admin/BoardGrid";
@@ -147,15 +148,52 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
   const [tab, setTab] = useState<Tab>("rota");
   const { connected, lastEvent } = useRotaEvents();
 
+  // Live Inbox state is owned here (not inside BroadcastEngine) so the unread
+  // badge on the Broadcast Engine tab updates in real time even while the
+  // operator is on another tab — the console is always mounted, the tab panes
+  // are not.
+  const [messages, setMessages] = useState<IncomingMessage[]>([]);
+  const [unread, setUnread] = useState(0);
+  const [loadingInbox, setLoadingInbox] = useState(true);
+  const [marking, setMarking] = useState(false);
+
+  const loadInbox = useCallback(() => {
+    admin
+      .messages(200)
+      .then((r) => {
+        setMessages(r.messages);
+        setUnread(r.unread);
+      })
+      .finally(() => setLoadingInbox(false));
+  }, []);
+
+  useEffect(loadInbox, [loadInbox]);
+
+  // A new inbound text arrived over SSE — refresh the feed + unread count.
+  useEffect(() => {
+    if (lastEvent?.type === "message.received") loadInbox();
+  }, [lastEvent, loadInbox]);
+
+  const markAll = useCallback(async () => {
+    setMarking(true);
+    try {
+      await admin.markAllMessagesRead();
+      setMessages((prev) => prev.map((m) => ({ ...m, isRead: true })));
+      setUnread(0);
+    } finally {
+      setMarking(false);
+    }
+  }, []);
+
   function signOut() {
     clearAdminKey();
     onSignOut();
   }
 
-  const tabs: { key: Tab; label: string; icon: React.ReactNode }[] = [
+  const tabs: { key: Tab; label: string; icon: React.ReactNode; badge?: number }[] = [
     { key: "rota", label: "Rota Board", icon: <LayoutGrid size={16} /> },
     { key: "workers", label: "Workers", icon: <Users size={16} /> },
-    { key: "broadcast", label: "Broadcast Engine", icon: <Radio size={16} /> },
+    { key: "broadcast", label: "Broadcast Engine", icon: <Radio size={16} />, badge: unread },
   ];
 
   return (
@@ -193,7 +231,7 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
           <button
             key={t.key}
             onClick={() => setTab(t.key)}
-            className={`inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3.5 py-2 text-sm font-medium transition ${
+            className={`relative inline-flex items-center gap-1.5 whitespace-nowrap rounded-lg px-3.5 py-2 text-sm font-medium transition ${
               tab === t.key
                 ? "bg-brand text-white"
                 : "bg-card text-muted hover:text-foreground border border-border"
@@ -201,13 +239,31 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
           >
             {t.icon}
             {t.label}
+            {t.badge ? (
+              <span
+                className={`ml-0.5 grid h-[18px] min-w-[18px] place-items-center rounded-full px-1 text-[10px] font-bold tabular-nums ${
+                  tab === t.key ? "bg-white/25 text-white" : "bg-rose-500 text-white"
+                }`}
+                title={`${t.badge} unread message${t.badge === 1 ? "" : "s"}`}
+              >
+                {t.badge > 99 ? "99+" : t.badge}
+              </span>
+            ) : null}
           </button>
         ))}
       </nav>
 
       {tab === "rota" && <BoardGrid lastEvent={lastEvent} />}
       {tab === "workers" && <WorkersManager />}
-      {tab === "broadcast" && <BroadcastEngine lastEvent={lastEvent} />}
+      {tab === "broadcast" && (
+        <BroadcastEngine
+          messages={messages}
+          unread={unread}
+          loadingInbox={loadingInbox}
+          marking={marking}
+          onMarkAll={markAll}
+        />
+      )}
     </main>
   );
 }

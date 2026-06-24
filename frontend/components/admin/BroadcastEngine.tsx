@@ -23,7 +23,6 @@ import type {
   ClientLite,
   IncomingMessage,
   RecipientCandidate,
-  RotaEvent,
 } from "@/lib/types";
 import { POOL_LABELS, SLOT_LABELS, formatDate } from "@/lib/ui";
 import { STATUS_STYLES, cellText } from "@/lib/boardUi";
@@ -40,40 +39,23 @@ interface ClientGroup {
   workers: RecipientCandidate[];
 }
 
-export default function BroadcastEngine({ lastEvent }: { lastEvent: RotaEvent | null }) {
+export default function BroadcastEngine({
+  messages,
+  unread,
+  loadingInbox,
+  marking,
+  onMarkAll,
+}: {
+  messages: IncomingMessage[];
+  unread: number;
+  loadingInbox: boolean;
+  marking: boolean;
+  onMarkAll: () => void;
+}) {
+  // The inbox feed/unread/mark-all state is owned by the parent AdminConsole so
+  // the unread badge stays live on the Broadcast Engine tab even when another
+  // tab is open. This component just renders what it's given.
   const [view, setView] = useState<"broadcast" | "inbox">("broadcast");
-  const [messages, setMessages] = useState<IncomingMessage[]>([]);
-  const [unread, setUnread] = useState(0);
-  const [loadingInbox, setLoadingInbox] = useState(true);
-  const [marking, setMarking] = useState(false);
-
-  const loadInbox = useCallback(() => {
-    admin
-      .messages(200)
-      .then((r) => {
-        setMessages(r.messages);
-        setUnread(r.unread);
-      })
-      .finally(() => setLoadingInbox(false));
-  }, []);
-
-  useEffect(loadInbox, [loadInbox]);
-
-  // Live: a new inbound message arrived over SSE — refresh the feed.
-  useEffect(() => {
-    if (lastEvent?.type === "message.received") loadInbox();
-  }, [lastEvent, loadInbox]);
-
-  async function markAll() {
-    setMarking(true);
-    try {
-      await admin.markAllMessagesRead();
-      setMessages((prev) => prev.map((m) => ({ ...m, isRead: true })));
-      setUnread(0);
-    } finally {
-      setMarking(false);
-    }
-  }
 
   return (
     <div className="mx-auto max-w-3xl space-y-4">
@@ -102,7 +84,7 @@ export default function BroadcastEngine({ lastEvent }: { lastEvent: RotaEvent | 
           loading={loadingInbox}
           unread={unread}
           marking={marking}
-          onMarkAll={markAll}
+          onMarkAll={onMarkAll}
         />
       )}
     </div>
