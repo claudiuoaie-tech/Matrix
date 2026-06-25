@@ -19,6 +19,7 @@ import {
   Reply,
   Trash2,
   X,
+  Plus,
 } from "lucide-react";
 import { admin } from "@/lib/api";
 import type {
@@ -52,6 +53,8 @@ export default function BroadcastEngine({
   onReply,
   onDelete,
   onClearRead,
+  onBulkDelete,
+  onSendDirect,
 }: {
   messages: IncomingMessage[];
   unread: number;
@@ -61,6 +64,8 @@ export default function BroadcastEngine({
   onReply: (recipientPhone: string, body: string, channel: MessageChannel) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onClearRead: () => Promise<void>;
+  onBulkDelete: (ids: string[]) => Promise<void>;
+  onSendDirect: (phoneNumber: string, body: string, channel: MessageChannel) => Promise<void>;
 }) {
   // The inbox feed/unread/mark-all state is owned by the parent AdminConsole so
   // the unread badge stays live on the Broadcast Engine tab even when another
@@ -98,6 +103,8 @@ export default function BroadcastEngine({
           onReply={onReply}
           onDelete={onDelete}
           onClearRead={onClearRead}
+          onBulkDelete={onBulkDelete}
+          onSendDirect={onSendDirect}
         />
       )}
     </div>
@@ -681,6 +688,8 @@ function InboxPane({
   onReply,
   onDelete,
   onClearRead,
+  onBulkDelete,
+  onSendDirect,
 }: {
   messages: IncomingMessage[];
   loading: boolean;
@@ -690,13 +699,76 @@ function InboxPane({
   onReply: (recipientPhone: string, body: string, channel: MessageChannel) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onClearRead: () => Promise<void>;
+  onBulkDelete: (ids: string[]) => Promise<void>;
+  onSendDirect: (phoneNumber: string, body: string, channel: MessageChannel) => Promise<void>;
 }) {
   // Client-side view filter (Feature 3). "unread" shows only inbound un-read.
   const [filter, setFilter] = useState<"all" | "unread">("all");
   const [clearing, setClearing] = useState(false);
+  // Multi-select deletion (Phase 2, Feature 1).
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const masterRef = useRef<HTMLInputElement>(null);
+  // Ad-hoc "New message" composer modal (Phase 2, Feature 2).
+  const [composeOpen, setComposeOpen] = useState(false);
 
   const visible = filter === "unread" ? messages.filter((m) => !m.isRead) : messages;
   const readCount = messages.filter((m) => m.isRead).length;
+
+  // Drop selections for messages that no longer exist (after deletes / reloads).
+  useEffect(() => {
+    setSelected((prev) => {
+      const live = new Set(messages.map((m) => m.id));
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (live.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [messages]);
+
+  const visibleIds = visible.map((m) => m.id);
+  const allVisibleSelected =
+    visibleIds.length > 0 && visibleIds.every((id) => selected.has(id));
+  const someVisibleSelected =
+    !allVisibleSelected && visibleIds.some((id) => selected.has(id));
+
+  // Reflect the "some but not all" state on the master checkbox.
+  useEffect(() => {
+    if (masterRef.current) masterRef.current.indeterminate = someVisibleSelected;
+  }, [someVisibleSelected]);
+
+  function toggleSelect(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleSelectAllVisible() {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (allVisibleSelected) visibleIds.forEach((id) => next.delete(id));
+      else visibleIds.forEach((id) => next.add(id));
+      return next;
+    });
+  }
+
+  async function deleteSelected() {
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    setBulkDeleting(true);
+    try {
+      await onBulkDelete(ids);
+      setSelected(new Set());
+    } finally {
+      setBulkDeleting(false);
+    }
+  }
 
   async function clearRead() {
     if (!window.confirm(`Delete all ${readCount} read message(s)? This cannot be undone.`)) {
@@ -721,6 +793,13 @@ function InboxPane({
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
+          {/* Phase 2, Feature 2 — ad-hoc outbound to any number */}
+          <button
+            onClick={() => setComposeOpen(true)}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-brand px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90"
+          >
+            <Plus size={14} /> New message
+          </button>
           {/* Feature 3 — All / Unread filter toggle */}
           <div className="inline-flex rounded-lg border border-border p-0.5">
             <FilterTab active={filter === "all"} onClick={() => setFilter("all")} label="All" />
@@ -738,7 +817,7 @@ function InboxPane({
             {marking ? <Loader2 size={14} className="animate-spin" /> : <CheckCheck size={14} />}
             Mark all read
           </button>
-          {/* Feature 2 — bulk clear read history */}
+          {/* Feature 2 (prior phase) — bulk clear read history */}
           <button
             onClick={clearRead}
             disabled={clearing || readCount === 0}
@@ -750,6 +829,36 @@ function InboxPane({
           </button>
         </div>
       </div>
+
+      {/* Phase 2, Feature 1 — select-all + delete-selected bar */}
+      {!loading && visible.length > 0 && (
+        <div className="flex items-center justify-between gap-2 border-b border-border bg-slate-50/60 px-4 py-2">
+          <label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-muted">
+            <input
+              ref={masterRef}
+              type="checkbox"
+              checked={allVisibleSelected}
+              onChange={toggleSelectAllVisible}
+              className="h-4 w-4 accent-[var(--brand)]"
+            />
+            {selected.size > 0 ? `${selected.size} selected` : "Select all"}
+          </label>
+          {selected.size > 0 && (
+            <button
+              onClick={deleteSelected}
+              disabled={bulkDeleting}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-700 disabled:opacity-50"
+            >
+              {bulkDeleting ? (
+                <Loader2 size={14} className="animate-spin" />
+              ) : (
+                <Trash2 size={14} />
+              )}
+              Delete selected ({selected.size})
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="max-h-[28rem] overflow-y-auto thin-scroll">
         {loading ? (
@@ -766,12 +875,149 @@ function InboxPane({
         ) : (
           <ul className="divide-y divide-border">
             {visible.map((m) => (
-              <MessageCard key={m.id} m={m} onReply={onReply} onDelete={onDelete} />
+              <MessageCard
+                key={m.id}
+                m={m}
+                selected={selected.has(m.id)}
+                onToggleSelect={toggleSelect}
+                onReply={onReply}
+                onDelete={onDelete}
+              />
             ))}
           </ul>
         )}
       </div>
+
+      {composeOpen && (
+        <NewMessageModal onClose={() => setComposeOpen(false)} onSend={onSendDirect} />
+      )}
     </section>
+  );
+}
+
+/**
+ * Ad-hoc outbound composer (Phase 2, Feature 2). Sends to ANY number via
+ * /api/admin/messages/send-direct — recipient need not be an existing worker.
+ */
+function NewMessageModal({
+  onClose,
+  onSend,
+}: {
+  onClose: () => void;
+  onSend: (phoneNumber: string, body: string, channel: MessageChannel) => Promise<void>;
+}) {
+  const [phone, setPhone] = useState("");
+  const [channel, setChannel] = useState<MessageChannel>("SMS");
+  const [body, setBody] = useState("");
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function send() {
+    const p = phone.trim();
+    const b = body.trim();
+    if (!p || !b) {
+      setError("Enter a phone number and a message.");
+      return;
+    }
+    // Light client-side guard; the number should ideally be E.164 (e.g. +447…).
+    if (!/^\+?[0-9\s()-]{6,}$/.test(p)) {
+      setError("Enter a valid phone number, ideally in full international form like +447700900123.");
+      return;
+    }
+    setSending(true);
+    setError(null);
+    try {
+      await onSend(p, b, channel);
+      onClose();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to send message.");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 grid place-items-center bg-black/40 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md rounded-2xl border border-border bg-card p-5 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-4 flex items-center justify-between">
+          <h3 className="font-semibold">New message</h3>
+          <button onClick={onClose} className="text-muted hover:text-foreground" title="Close">
+            <X size={18} />
+          </button>
+        </div>
+
+        <label className="mb-1 block text-xs font-medium text-muted">Phone number</label>
+        <input
+          value={phone}
+          onChange={(e) => setPhone(e.target.value)}
+          autoFocus
+          inputMode="tel"
+          placeholder="+447700900123"
+          className="mb-1 w-full rounded-lg border border-border bg-white px-3 py-2 text-sm outline-none focus:border-brand"
+        />
+        <p className="mb-3 text-[11px] text-muted">
+          Include the country code (e.g. +44 for the UK). Any number works — it need not be a saved worker.
+        </p>
+
+        <label className="mb-1 block text-xs font-medium text-muted">Send via</label>
+        <div className="mb-3 inline-flex rounded-lg border border-border p-0.5">
+          <button
+            type="button"
+            onClick={() => setChannel("SMS")}
+            className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition ${
+              channel === "SMS" ? "bg-brand text-white" : "text-muted hover:text-foreground"
+            }`}
+          >
+            <MessageSquare size={15} /> SMS
+          </button>
+          <button
+            type="button"
+            onClick={() => setChannel("WHATSAPP")}
+            className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition ${
+              channel === "WHATSAPP"
+                ? "bg-emerald-600 text-white"
+                : "text-muted hover:text-foreground"
+            }`}
+          >
+            <MessageCircle size={15} /> WhatsApp
+          </button>
+        </div>
+
+        <label className="mb-1 block text-xs font-medium text-muted">Message</label>
+        <textarea
+          value={body}
+          onChange={(e) => setBody(e.target.value)}
+          rows={4}
+          placeholder="Type your message…"
+          className="w-full resize-none rounded-lg border border-border bg-white p-3 text-sm outline-none focus:border-brand"
+        />
+
+        {error && <p className="mt-2 text-xs text-rose-600">{error}</p>}
+
+        <div className="mt-4 flex items-center justify-end gap-2">
+          <button
+            onClick={onClose}
+            className="inline-flex items-center gap-1 rounded-lg border border-border px-3 py-2 text-sm font-medium text-muted hover:bg-slate-50"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={send}
+            disabled={sending || !phone.trim() || !body.trim()}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-brand px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+          >
+            {sending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
+            Send
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -798,10 +1044,14 @@ function FilterTab({
 
 function MessageCard({
   m,
+  selected,
+  onToggleSelect,
   onReply,
   onDelete,
 }: {
   m: IncomingMessage;
+  selected: boolean;
+  onToggleSelect: (id: string) => void;
   onReply: (recipientPhone: string, body: string, channel: MessageChannel) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
 }) {
@@ -844,10 +1094,24 @@ function MessageCard({
   return (
     <li
       className={`group px-4 py-3 transition-colors ${
-        outbound ? "bg-emerald-50/40" : m.isRead ? "" : "bg-indigo-50/40"
+        selected
+          ? "bg-indigo-50"
+          : outbound
+          ? "bg-emerald-50/40"
+          : m.isRead
+          ? ""
+          : "bg-indigo-50/40"
       }`}
     >
       <div className="flex gap-3">
+        {/* Selection checkbox (Phase 2, Feature 1). */}
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={() => onToggleSelect(m.id)}
+          aria-label="Select message"
+          className="mt-1 h-4 w-4 shrink-0 accent-[var(--brand)]"
+        />
         {/* Fixed-width marker column keeps rows aligned. */}
         <span className="mt-1.5 flex h-2 w-2 shrink-0">
           {!m.isRead && !outbound && (

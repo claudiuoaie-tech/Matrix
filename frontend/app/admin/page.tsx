@@ -213,6 +213,27 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
     loadInbox();
   }, [loadInbox]);
 
+  // Batch-delete an explicit set of ids (multi-select), then resync the badge.
+  const bulkDeleteMessages = useCallback(
+    async (ids: string[]) => {
+      await admin.bulkDeleteMessages(ids);
+      const idSet = new Set(ids);
+      setMessages((prev) => prev.filter((m) => !idSet.has(m.id)));
+      loadInbox();
+    },
+    [loadInbox]
+  );
+
+  // Ad-hoc outbound to any number; prepend the logged OUTBOUND row for feedback.
+  const sendDirectMessage = useCallback(
+    async (phoneNumber: string, body: string, channel: MessageChannel) => {
+      const channelType = channel === "WHATSAPP" ? "whatsapp" : "sms";
+      const { message } = await admin.sendDirectMessage(phoneNumber, body, channelType);
+      setMessages((prev) => [message, ...prev]);
+    },
+    []
+  );
+
   function signOut() {
     clearAdminKey();
     onSignOut();
@@ -293,6 +314,8 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
           onReply={replyToMessage}
           onDelete={deleteMessage}
           onClearRead={clearReadHistory}
+          onBulkDelete={bulkDeleteMessages}
+          onSendDirect={sendDirectMessage}
         />
       )}
     </main>

@@ -260,10 +260,26 @@ export const admin = {
       method: "DELETE",
       admin: true,
     }),
+  bulkDeleteMessages: (ids: string[]) =>
+    request<{ ok: boolean; deleted: number }>("/api/admin/messages/bulk", {
+      method: "DELETE",
+      admin: true,
+      body: { ids },
+    }),
   clearReadMessages: () =>
     request<{ ok: boolean; deleted: number }>("/api/admin/messages/clear-read", {
       method: "DELETE",
       admin: true,
+    }),
+  sendDirectMessage: (
+    phoneNumber: string,
+    messageBody: string,
+    channelType: "sms" | "whatsapp"
+  ) =>
+    request<{ ok: boolean; message: IncomingMessage }>("/api/admin/messages/send-direct", {
+      method: "POST",
+      admin: true,
+      body: { phoneNumber, messageBody, channelType },
     }),
 
   // EventSource cannot set headers, so the admin key rides as a query param.

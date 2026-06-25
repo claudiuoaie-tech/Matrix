@@ -919,10 +919,61 @@ adminRouter.post(
   }
 );
 
+/** Map a "sms" | "whatsapp" body field to the MessageChannel enum (SMS default). */
+function parseChannelType(raw: unknown): MessageChannel {
+  return String(raw ?? "sms").toLowerCase() === "whatsapp" ? "WHATSAPP" : "SMS";
+}
+
+/**
+ * Send an outbound SMS/WhatsApp message and log it to the inbox as an OUTBOUND,
+ * already-read row so it threads with the contact and never inflates "unread".
+ * Works for ANY number — links to a Worker by phone when one matches, otherwise
+ * logs the bare number. Shared by /messages/reply and /messages/send-direct.
+ */
+async function sendOutboundMessage(
+  phone: string,
+  body: string,
+  channel: MessageChannel
+) {
+  // Send via Twilio (mock-logs without real creds; never throws on a bad number).
+  await sendMessage(phone, body, channel);
+
+  // Link to a worker by phone so the message threads under their name (if any).
+  const worker = await prisma.worker.findUnique({
+    where: { phone },
+    select: { id: true, name: true },
+  });
+
+  const msg = await prisma.incomingMessage.create({
+    data: {
+      fromNumber: phone, // the contact's number = the thread key
+      messageBody: body,
+      channel,
+      direction: "OUTBOUND",
+      workerId: worker?.id ?? null,
+      isRead: true,
+    },
+  });
+
+  const payload = {
+    id: msg.id,
+    fromNumber: msg.fromNumber,
+    messageBody: msg.messageBody,
+    channel: msg.channel,
+    direction: msg.direction,
+    receivedAt: msg.receivedAt.toISOString(),
+    isRead: msg.isRead,
+    workerName: worker?.name ?? null,
+  };
+
+  // Push to any other connected admin dashboards in real time.
+  emitRotaEvent({ type: "message.received", payload });
+  return payload;
+}
+
 /**
  * POST /api/admin/messages/reply
- * Send an outbound SMS/WhatsApp reply to a contact and log it to the inbox so it
- * threads with their inbound messages. Body:
+ * Reply to an existing contact/thread. Body:
  *   { recipientPhone: string, messageBody: string, channelType: "sms" | "whatsapp" }
  */
 adminRouter.post(
@@ -930,52 +981,39 @@ adminRouter.post(
   async (req: Request, res: Response): Promise<void> => {
     const recipientPhone = String(req.body?.recipientPhone ?? "").trim();
     const messageBody = String(req.body?.messageBody ?? "").trim();
-    const channel: MessageChannel =
-      String(req.body?.channelType ?? "sms").toLowerCase() === "whatsapp"
-        ? "WHATSAPP"
-        : "SMS";
-
     if (!recipientPhone || !messageBody) {
       res.status(400).json({ error: "recipientPhone and messageBody are required." });
       return;
     }
+    const message = await sendOutboundMessage(
+      recipientPhone,
+      messageBody,
+      parseChannelType(req.body?.channelType)
+    );
+    res.status(201).json({ ok: true, message });
+  }
+);
 
-    // Send via Twilio (mock-logs without real creds; never throws on a bad number).
-    await sendMessage(recipientPhone, messageBody, channel);
-
-    // Link to a worker by phone so the reply threads under their name.
-    const worker = await prisma.worker.findUnique({
-      where: { phone: recipientPhone },
-      select: { id: true, name: true },
-    });
-
-    // Logged as already-read (we sent it) so it never counts toward "unread".
-    const msg = await prisma.incomingMessage.create({
-      data: {
-        fromNumber: recipientPhone, // the contact's number = the thread key
-        messageBody,
-        channel,
-        direction: "OUTBOUND",
-        workerId: worker?.id ?? null,
-        isRead: true,
-      },
-    });
-
-    const payload = {
-      id: msg.id,
-      fromNumber: msg.fromNumber,
-      messageBody: msg.messageBody,
-      channel: msg.channel,
-      direction: msg.direction,
-      receivedAt: msg.receivedAt.toISOString(),
-      isRead: msg.isRead,
-      workerName: worker?.name ?? null,
-    };
-
-    // Push to any other connected admin dashboards in real time.
-    emitRotaEvent({ type: "message.received", payload });
-
-    res.status(201).json({ ok: true, message: payload });
+/**
+ * POST /api/admin/messages/send-direct
+ * Send an ad-hoc message to ANY number, whether or not it matches a worker. Body:
+ *   { phoneNumber: string, messageBody: string, channelType: "sms" | "whatsapp" }
+ */
+adminRouter.post(
+  "/messages/send-direct",
+  async (req: Request, res: Response): Promise<void> => {
+    const phoneNumber = String(req.body?.phoneNumber ?? "").trim();
+    const messageBody = String(req.body?.messageBody ?? "").trim();
+    if (!phoneNumber || !messageBody) {
+      res.status(400).json({ error: "phoneNumber and messageBody are required." });
+      return;
+    }
+    const message = await sendOutboundMessage(
+      phoneNumber,
+      messageBody,
+      parseChannelType(req.body?.channelType)
+    );
+    res.status(201).json({ ok: true, message });
   }
 );
 
@@ -987,6 +1025,28 @@ adminRouter.delete(
   "/messages/clear-read",
   async (_req: Request, res: Response): Promise<void> => {
     const result = await prisma.incomingMessage.deleteMany({ where: { isRead: true } });
+    res.json({ ok: true, deleted: result.count });
+  }
+);
+
+/**
+ * DELETE /api/admin/messages/bulk — batch-delete by an array of ids.
+ * Body: { ids: string[] }. Declared BEFORE the :id route so "bulk" isn't
+ * captured as an id.
+ */
+adminRouter.delete(
+  "/messages/bulk",
+  async (req: Request, res: Response): Promise<void> => {
+    const ids = Array.isArray(req.body?.ids)
+      ? req.body.ids.filter((x: unknown): x is string => typeof x === "string")
+      : [];
+    if (ids.length === 0) {
+      res.status(400).json({ error: "ids must be a non-empty array of message ids." });
+      return;
+    }
+    const result = await prisma.incomingMessage.deleteMany({
+      where: { id: { in: ids } },
+    });
     res.json({ ok: true, deleted: result.count });
   }
 );
