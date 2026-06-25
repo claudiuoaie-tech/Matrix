@@ -11,6 +11,7 @@ import type {
   HolidayRequest,
   ImportSummary,
   InboxResponse,
+  IncomingMessage,
   RecipientCandidate,
   RotaResponse,
   RotaStatus,
@@ -242,6 +243,26 @@ export const admin = {
   markAllMessagesRead: () =>
     request<{ ok: boolean; updated: number }>("/api/admin/messages/read-all", {
       method: "POST",
+      admin: true,
+    }),
+  replyToMessage: (
+    recipientPhone: string,
+    messageBody: string,
+    channelType: "sms" | "whatsapp"
+  ) =>
+    request<{ ok: boolean; message: IncomingMessage }>("/api/admin/messages/reply", {
+      method: "POST",
+      admin: true,
+      body: { recipientPhone, messageBody, channelType },
+    }),
+  deleteMessage: (id: string) =>
+    request<{ ok: boolean }>(`/api/admin/messages/${id}`, {
+      method: "DELETE",
+      admin: true,
+    }),
+  clearReadMessages: () =>
+    request<{ ok: boolean; deleted: number }>("/api/admin/messages/clear-read", {
+      method: "DELETE",
       admin: true,
     }),
 

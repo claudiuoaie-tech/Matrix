@@ -2,7 +2,7 @@ import { Router, Request, Response } from "express";
 import fs from "fs";
 import path from "path";
 import { randomUUID } from "crypto";
-import type { ClientPool, RotaStatus, DocType } from "@prisma/client";
+import type { ClientPool, RotaStatus, DocType, MessageChannel } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { sendSms, sendMessage } from "../lib/twilio";
 import { bus, emitRotaEvent, RotaEvent } from "../lib/events";
@@ -888,6 +888,8 @@ adminRouter.get("/messages", async (req: Request, res: Response): Promise<void> 
     include: { worker: { select: { name: true } } },
   });
 
+  // Unread only counts inbound messages — our own outbound replies are logged as
+  // already-read, so they never inflate the badge.
   const unread = await prisma.incomingMessage.count({ where: { isRead: false } });
 
   res.json({
@@ -897,6 +899,7 @@ adminRouter.get("/messages", async (req: Request, res: Response): Promise<void> 
       fromNumber: m.fromNumber,
       messageBody: m.messageBody,
       channel: m.channel,
+      direction: m.direction,
       receivedAt: m.receivedAt.toISOString(),
       isRead: m.isRead,
       workerName: m.worker?.name ?? null,
@@ -913,6 +916,93 @@ adminRouter.post(
       data: { isRead: true },
     });
     res.json({ ok: true, updated: result.count });
+  }
+);
+
+/**
+ * POST /api/admin/messages/reply
+ * Send an outbound SMS/WhatsApp reply to a contact and log it to the inbox so it
+ * threads with their inbound messages. Body:
+ *   { recipientPhone: string, messageBody: string, channelType: "sms" | "whatsapp" }
+ */
+adminRouter.post(
+  "/messages/reply",
+  async (req: Request, res: Response): Promise<void> => {
+    const recipientPhone = String(req.body?.recipientPhone ?? "").trim();
+    const messageBody = String(req.body?.messageBody ?? "").trim();
+    const channel: MessageChannel =
+      String(req.body?.channelType ?? "sms").toLowerCase() === "whatsapp"
+        ? "WHATSAPP"
+        : "SMS";
+
+    if (!recipientPhone || !messageBody) {
+      res.status(400).json({ error: "recipientPhone and messageBody are required." });
+      return;
+    }
+
+    // Send via Twilio (mock-logs without real creds; never throws on a bad number).
+    await sendMessage(recipientPhone, messageBody, channel);
+
+    // Link to a worker by phone so the reply threads under their name.
+    const worker = await prisma.worker.findUnique({
+      where: { phone: recipientPhone },
+      select: { id: true, name: true },
+    });
+
+    // Logged as already-read (we sent it) so it never counts toward "unread".
+    const msg = await prisma.incomingMessage.create({
+      data: {
+        fromNumber: recipientPhone, // the contact's number = the thread key
+        messageBody,
+        channel,
+        direction: "OUTBOUND",
+        workerId: worker?.id ?? null,
+        isRead: true,
+      },
+    });
+
+    const payload = {
+      id: msg.id,
+      fromNumber: msg.fromNumber,
+      messageBody: msg.messageBody,
+      channel: msg.channel,
+      direction: msg.direction,
+      receivedAt: msg.receivedAt.toISOString(),
+      isRead: msg.isRead,
+      workerName: worker?.name ?? null,
+    };
+
+    // Push to any other connected admin dashboards in real time.
+    emitRotaEvent({ type: "message.received", payload });
+
+    res.status(201).json({ ok: true, message: payload });
+  }
+);
+
+/**
+ * DELETE /api/admin/messages/clear-read — bulk-delete all read messages.
+ * Declared BEFORE the :id route so "clear-read" isn't captured as an id.
+ */
+adminRouter.delete(
+  "/messages/clear-read",
+  async (_req: Request, res: Response): Promise<void> => {
+    const result = await prisma.incomingMessage.deleteMany({ where: { isRead: true } });
+    res.json({ ok: true, deleted: result.count });
+  }
+);
+
+/** DELETE /api/admin/messages/:id — delete a single message. */
+adminRouter.delete(
+  "/messages/:id",
+  async (req: Request, res: Response): Promise<void> => {
+    const id = String(req.params.id);
+    try {
+      await prisma.incomingMessage.delete({ where: { id } });
+    } catch {
+      res.status(404).json({ error: "Message not found." });
+      return;
+    }
+    res.json({ ok: true });
   }
 );
 

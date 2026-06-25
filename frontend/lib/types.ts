@@ -65,11 +65,14 @@ export interface ScheduleEntry {
 
 export type MessageChannel = "SMS" | "WHATSAPP";
 
+export type MessageDirection = "INBOUND" | "OUTBOUND";
+
 export interface IncomingMessage {
   id: string;
   fromNumber: string;
   messageBody: string;
   channel: MessageChannel;
+  direction: MessageDirection;
   receivedAt: string;
   isRead: boolean;
   workerName: string | null;

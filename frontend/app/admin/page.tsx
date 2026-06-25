@@ -14,7 +14,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { auth, admin, ApiError } from "@/lib/api";
-import type { IncomingMessage } from "@/lib/types";
+import type { IncomingMessage, MessageChannel } from "@/lib/types";
 import { getAdminKey, setAdminKey, clearAdminKey } from "@/lib/adminSession";
 import { useRotaEvents } from "@/lib/useRotaEvents";
 import BoardGrid from "@/components/admin/BoardGrid";
@@ -185,6 +185,34 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
     }
   }, []);
 
+  // Send an outbound reply and prepend it (newest-first) for instant feedback.
+  // The server also emits message.received, so other admins refresh too.
+  const replyToMessage = useCallback(
+    async (recipientPhone: string, body: string, channel: MessageChannel) => {
+      const channelType = channel === "WHATSAPP" ? "whatsapp" : "sms";
+      const { message } = await admin.replyToMessage(recipientPhone, body, channelType);
+      setMessages((prev) => [message, ...prev]);
+    },
+    []
+  );
+
+  // Delete one message, then reload so the unread badge stays authoritative.
+  const deleteMessage = useCallback(
+    async (id: string) => {
+      await admin.deleteMessage(id);
+      setMessages((prev) => prev.filter((m) => m.id !== id));
+      loadInbox();
+    },
+    [loadInbox]
+  );
+
+  // Bulk-delete every read message (unread ones are kept), then resync.
+  const clearReadHistory = useCallback(async () => {
+    await admin.clearReadMessages();
+    setMessages((prev) => prev.filter((m) => !m.isRead));
+    loadInbox();
+  }, [loadInbox]);
+
   function signOut() {
     clearAdminKey();
     onSignOut();
@@ -262,6 +290,9 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
           loadingInbox={loadingInbox}
           marking={marking}
           onMarkAll={markAll}
+          onReply={replyToMessage}
+          onDelete={deleteMessage}
+          onClearRead={clearReadHistory}
         />
       )}
     </main>

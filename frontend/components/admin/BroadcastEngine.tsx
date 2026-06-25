@@ -16,12 +16,16 @@ import {
   Inbox,
   MessageSquare,
   MessageCircle,
+  Reply,
+  Trash2,
+  X,
 } from "lucide-react";
 import { admin } from "@/lib/api";
 import type {
   BoardCell,
   ClientLite,
   IncomingMessage,
+  MessageChannel,
   RecipientCandidate,
 } from "@/lib/types";
 import { POOL_LABELS, SLOT_LABELS, formatDate } from "@/lib/ui";
@@ -45,12 +49,18 @@ export default function BroadcastEngine({
   loadingInbox,
   marking,
   onMarkAll,
+  onReply,
+  onDelete,
+  onClearRead,
 }: {
   messages: IncomingMessage[];
   unread: number;
   loadingInbox: boolean;
   marking: boolean;
   onMarkAll: () => void;
+  onReply: (recipientPhone: string, body: string, channel: MessageChannel) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+  onClearRead: () => Promise<void>;
 }) {
   // The inbox feed/unread/mark-all state is owned by the parent AdminConsole so
   // the unread badge stays live on the Broadcast Engine tab even when another
@@ -85,6 +95,9 @@ export default function BroadcastEngine({
           unread={unread}
           marking={marking}
           onMarkAll={onMarkAll}
+          onReply={onReply}
+          onDelete={onDelete}
+          onClearRead={onClearRead}
         />
       )}
     </div>
@@ -665,16 +678,41 @@ function InboxPane({
   unread,
   marking,
   onMarkAll,
+  onReply,
+  onDelete,
+  onClearRead,
 }: {
   messages: IncomingMessage[];
   loading: boolean;
   unread: number;
   marking: boolean;
   onMarkAll: () => void;
+  onReply: (recipientPhone: string, body: string, channel: MessageChannel) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+  onClearRead: () => Promise<void>;
 }) {
+  // Client-side view filter (Feature 3). "unread" shows only inbound un-read.
+  const [filter, setFilter] = useState<"all" | "unread">("all");
+  const [clearing, setClearing] = useState(false);
+
+  const visible = filter === "unread" ? messages.filter((m) => !m.isRead) : messages;
+  const readCount = messages.filter((m) => m.isRead).length;
+
+  async function clearRead() {
+    if (!window.confirm(`Delete all ${readCount} read message(s)? This cannot be undone.`)) {
+      return;
+    }
+    setClearing(true);
+    try {
+      await onClearRead();
+    } finally {
+      setClearing(false);
+    }
+  }
+
   return (
     <section className="rounded-2xl border border-border bg-card">
-      <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
         <div>
           <h3 className="font-semibold">Live Inbox</h3>
           <p className="text-xs text-muted">
@@ -682,14 +720,35 @@ function InboxPane({
             {unread > 0 ? ` · ${unread} unread` : ""}
           </p>
         </div>
-        <button
-          onClick={onMarkAll}
-          disabled={marking || unread === 0}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-white px-3 py-1.5 text-xs font-medium hover:bg-slate-50 disabled:opacity-50"
-        >
-          {marking ? <Loader2 size={14} className="animate-spin" /> : <CheckCheck size={14} />}
-          Mark all as read
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          {/* Feature 3 — All / Unread filter toggle */}
+          <div className="inline-flex rounded-lg border border-border p-0.5">
+            <FilterTab active={filter === "all"} onClick={() => setFilter("all")} label="All" />
+            <FilterTab
+              active={filter === "unread"}
+              onClick={() => setFilter("unread")}
+              label={`Unread${unread > 0 ? ` (${unread})` : ""}`}
+            />
+          </div>
+          <button
+            onClick={onMarkAll}
+            disabled={marking || unread === 0}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-white px-3 py-1.5 text-xs font-medium hover:bg-slate-50 disabled:opacity-50"
+          >
+            {marking ? <Loader2 size={14} className="animate-spin" /> : <CheckCheck size={14} />}
+            Mark all read
+          </button>
+          {/* Feature 2 — bulk clear read history */}
+          <button
+            onClick={clearRead}
+            disabled={clearing || readCount === 0}
+            title={readCount === 0 ? "No read messages to clear" : ""}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-white px-3 py-1.5 text-xs font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-50"
+          >
+            {clearing ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+            Clear read history
+          </button>
+        </div>
       </div>
 
       <div className="max-h-[28rem] overflow-y-auto thin-scroll">
@@ -697,15 +756,17 @@ function InboxPane({
           <div className="grid place-items-center py-12">
             <Loader2 className="animate-spin text-muted" />
           </div>
-        ) : messages.length === 0 ? (
+        ) : visible.length === 0 ? (
           <div className="px-4 py-12 text-center text-sm text-muted">
             <Inbox size={28} className="mx-auto mb-2 text-slate-300" />
-            No messages yet. Inbound texts appear here in real time.
+            {filter === "unread"
+              ? "No unread messages."
+              : "No messages yet. Inbound texts appear here in real time."}
           </div>
         ) : (
           <ul className="divide-y divide-border">
-            {messages.map((m) => (
-              <MessageCard key={m.id} m={m} />
+            {visible.map((m) => (
+              <MessageCard key={m.id} m={m} onReply={onReply} onDelete={onDelete} />
             ))}
           </ul>
         )}
@@ -714,32 +775,161 @@ function InboxPane({
   );
 }
 
-function MessageCard({ m }: { m: IncomingMessage }) {
-  const known = !!m.workerName;
+function FilterTab({
+  active,
+  onClick,
+  label,
+}: {
+  active: boolean;
+  onClick: () => void;
+  label: string;
+}) {
   return (
-    <li className={`flex gap-3 px-4 py-3 transition-colors ${m.isRead ? "" : "bg-indigo-50/40"}`}>
-      {/* Fixed-width unread marker column keeps read/unread rows aligned. */}
-      <span className="mt-1.5 flex h-2 w-2 shrink-0">
-        {!m.isRead && <span className="h-2 w-2 rounded-full bg-brand" title="Unread" />}
-      </span>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <span
-            className={`truncate text-sm ${
-              known ? "font-bold text-foreground" : "font-mono text-foreground"
-            }`}
-          >
-            {known ? m.workerName : m.fromNumber}
-          </span>
-          <ChannelBadge channel={m.channel} />
-          <span className="ml-auto shrink-0 text-[11px] text-muted">
-            {relativeTime(m.receivedAt)}
-          </span>
+    <button
+      onClick={onClick}
+      className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${
+        active ? "bg-brand text-white" : "text-muted hover:text-foreground"
+      }`}
+    >
+      {label}
+    </button>
+  );
+}
+
+function MessageCard({
+  m,
+  onReply,
+  onDelete,
+}: {
+  m: IncomingMessage;
+  onReply: (recipientPhone: string, body: string, channel: MessageChannel) => Promise<void>;
+  onDelete: (id: string) => Promise<void>;
+}) {
+  const known = !!m.workerName;
+  const outbound = m.direction === "OUTBOUND";
+
+  const [replyOpen, setReplyOpen] = useState(false);
+  const [replyText, setReplyText] = useState("");
+  const [sending, setSending] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function sendReply() {
+    const body = replyText.trim();
+    if (!body) return;
+    setSending(true);
+    setError(null);
+    try {
+      // Reply on the same channel the message belongs to, to the contact number.
+      await onReply(m.fromNumber, body, m.channel);
+      setReplyText("");
+      setReplyOpen(false);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to send reply");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function remove() {
+    if (deleting) return;
+    setDeleting(true);
+    try {
+      await onDelete(m.id);
+    } catch {
+      setDeleting(false); // keep the row if the delete failed
+    }
+  }
+
+  return (
+    <li
+      className={`group px-4 py-3 transition-colors ${
+        outbound ? "bg-emerald-50/40" : m.isRead ? "" : "bg-indigo-50/40"
+      }`}
+    >
+      <div className="flex gap-3">
+        {/* Fixed-width marker column keeps rows aligned. */}
+        <span className="mt-1.5 flex h-2 w-2 shrink-0">
+          {!m.isRead && !outbound && (
+            <span className="h-2 w-2 rounded-full bg-brand" title="Unread" />
+          )}
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span
+              className={`truncate text-sm ${
+                known ? "font-bold text-foreground" : "font-mono text-foreground"
+              }`}
+            >
+              {known ? m.workerName : m.fromNumber}
+            </span>
+            <ChannelBadge channel={m.channel} />
+            {outbound && (
+              <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
+                Sent
+              </span>
+            )}
+            <span className="ml-auto shrink-0 text-[11px] text-muted">
+              {relativeTime(m.receivedAt)}
+            </span>
+          </div>
+          {known && <p className="font-mono text-[11px] text-muted">{m.fromNumber}</p>}
+          <p className="mt-1 whitespace-pre-wrap break-words text-sm text-foreground">
+            {m.messageBody}
+          </p>
+
+          {/* Row actions — subtle, surfaced on hover/focus. */}
+          <div className="mt-1.5 flex items-center gap-3 text-muted opacity-100 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100 sm:focus-within:opacity-100">
+            <button
+              onClick={() => setReplyOpen((o) => !o)}
+              className="inline-flex items-center gap-1 text-[11px] font-medium hover:text-brand"
+            >
+              <Reply size={13} /> Reply
+            </button>
+            <button
+              onClick={remove}
+              disabled={deleting}
+              title="Delete message"
+              className="inline-flex items-center gap-1 text-[11px] font-medium hover:text-rose-600 disabled:opacity-50"
+            >
+              {deleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+            </button>
+          </div>
+
+          {/* Inline reply composer */}
+          {replyOpen && (
+            <div className="mt-2 rounded-xl border border-border bg-white p-2">
+              <textarea
+                value={replyText}
+                onChange={(e) => setReplyText(e.target.value)}
+                rows={2}
+                autoFocus
+                placeholder={`Reply via ${m.channel === "WHATSAPP" ? "WhatsApp" : "SMS"}…`}
+                className="w-full resize-none rounded-lg border border-border p-2 text-sm outline-none focus:border-brand"
+              />
+              {error && <p className="mt-1 text-xs text-rose-600">{error}</p>}
+              <div className="mt-1.5 flex items-center justify-end gap-2">
+                <button
+                  onClick={() => {
+                    setReplyOpen(false);
+                    setError(null);
+                  }}
+                  className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium text-muted hover:bg-slate-50"
+                >
+                  <X size={13} /> Cancel
+                </button>
+                <button
+                  onClick={sendReply}
+                  disabled={sending || !replyText.trim()}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-brand px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
+                >
+                  {sending ? <Loader2 size={13} className="animate-spin" /> : <Send size={13} />}
+                  Send
+                </button>
+              </div>
+            </div>
+          )}
         </div>
-        {known && <p className="font-mono text-[11px] text-muted">{m.fromNumber}</p>}
-        <p className="mt-1 whitespace-pre-wrap break-words text-sm text-foreground">
-          {m.messageBody}
-        </p>
       </div>
     </li>
   );

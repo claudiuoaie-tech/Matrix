@@ -70,6 +70,13 @@ enum MessageChannel {
   WHATSAPP
 }
 
+// Direction of a logged message: received from a contact (INBOUND) or sent by
+// an admin as a reply (OUTBOUND). Lets the inbox render a single threaded view.
+enum MessageDirection {
+  INBOUND
+  OUTBOUND
+}
+
 // Per-day status shown in a cell of the planning board (image-driven spec).
 // SCHEDULED carries a custom start time. Worker self-service can only set the
 // first five; the rest are admin-driven.
@@ -118,19 +125,23 @@ model Worker {
   @@map("workers")
 }
 
-// An inbound SMS / WhatsApp message captured by the webhook, logged for the
-// admin "Live Inbox" regardless of whether it matched an automated command.
-// workerId is linked when the sender's number matches a Worker (SetNull on
-// delete so the message survives as a raw-number entry).
+// A logged SMS / WhatsApp message in the admin "Live Inbox". INBOUND rows are
+// captured by the webhook (regardless of whether they matched an automated
+// command); OUTBOUND rows are admin replies sent via POST /messages/reply.
+// `fromNumber` always holds the CONTACT's number (the worker), for both
+// directions, so a conversation threads on a single key. workerId is linked
+// when the number matches a Worker (SetNull on delete so the message survives
+// as a raw-number entry).
 model IncomingMessage {
-  id          String         @id @default(uuid())
+  id          String           @id @default(uuid())
   fromNumber  String
-  messageBody String         @db.Text
-  channel     MessageChannel @default(SMS)
+  messageBody String           @db.Text
+  channel     MessageChannel   @default(SMS)
+  direction   MessageDirection @default(INBOUND)
   workerId    String?
-  worker      Worker?        @relation(fields: [workerId], references: [id], onDelete: SetNull)
-  receivedAt  DateTime       @default(now())
-  isRead      Boolean        @default(false)
+  worker      Worker?          @relation(fields: [workerId], references: [id], onDelete: SetNull)
+  receivedAt  DateTime         @default(now())
+  isRead      Boolean          @default(false)
 
   @@index([receivedAt])
   @@index([workerId])
