@@ -1138,9 +1138,29 @@ function MessageCard({
             </span>
           </div>
           {known && <p className="font-mono text-[11px] text-muted">{m.fromNumber}</p>}
-          <p className="mt-1 whitespace-pre-wrap break-words text-sm text-foreground">
-            {m.messageBody}
-          </p>
+          {m.messageBody && (
+            <p className="mt-1 whitespace-pre-wrap break-words text-sm text-foreground">
+              {m.messageBody}
+            </p>
+          )}
+          {/* Inbound media (MMS / WhatsApp photo) — thumbnail, click to open full size. */}
+          {m.mediaUrl && (
+            <a
+              href={m.mediaUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="mt-1.5 inline-block"
+              title="Open full-size image in a new tab"
+            >
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={m.mediaUrl}
+                alt="Attached media"
+                loading="lazy"
+                className="max-h-44 max-w-[12rem] rounded-lg border border-border object-cover transition hover:opacity-90"
+              />
+            </a>
+          )}
 
           {/* Row actions — subtle, surfaced on hover/focus. */}
           <div className="mt-1.5 flex items-center gap-3 text-muted opacity-100 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100 sm:focus-within:opacity-100">

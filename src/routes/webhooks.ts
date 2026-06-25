@@ -39,11 +39,12 @@ async function logIncoming(
   fromNumber: string,
   messageBody: string,
   channel: MessageChannel,
-  worker: { id: string; name: string } | null
+  worker: { id: string; name: string } | null,
+  mediaUrl: string | null
 ): Promise<void> {
   try {
     const msg = await prisma.incomingMessage.create({
-      data: { fromNumber, messageBody, channel, workerId: worker?.id ?? null },
+      data: { fromNumber, messageBody, channel, workerId: worker?.id ?? null, mediaUrl },
     });
     emitRotaEvent({
       type: "message.received",
@@ -52,6 +53,7 @@ async function logIncoming(
         fromNumber: msg.fromNumber,
         messageBody: msg.messageBody,
         channel: msg.channel,
+        mediaUrl: msg.mediaUrl,
         receivedAt: msg.receivedAt.toISOString(),
         isRead: msg.isRead,
         workerName: worker?.name ?? null,
@@ -99,6 +101,9 @@ webhooksRouter.post(
     try {
       const { channel, number: from } = parseSender(String(req.body?.From ?? ""));
       const body = String(req.body?.Body ?? "").trim();
+      // First media attachment, if any (MMS / WhatsApp photo). Twilio sends
+      // MediaUrl0..N; we capture the first.
+      const mediaUrl = String(req.body?.MediaUrl0 ?? "").trim() || null;
 
       if (!from) {
         replyEmpty(res);
@@ -113,7 +118,13 @@ webhooksRouter.post(
       // Log EVERY inbound message to the Live Inbox first — whether or not it
       // matches a worker or an automated command — then carry on with the
       // scheduling flow below.
-      await logIncoming(from, body, channel, worker ? { id: worker.id, name: worker.name } : null);
+      await logIncoming(
+        from,
+        body,
+        channel,
+        worker ? { id: worker.id, name: worker.name } : null,
+        mediaUrl
+      );
 
       // Unknown sender, or worker not eligible to respond -> safe no-op.
       if (!worker || worker.status === "INACTIVE" || worker.status === "SUSPENDED") {

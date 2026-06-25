@@ -143,6 +143,9 @@ model IncomingMessage {
   messageBody String           @db.Text
   channel     MessageChannel   @default(SMS)
   direction   MessageDirection @default(INBOUND)
+  // First inbound media attachment (Twilio MediaUrl0), e.g. an MMS / WhatsApp
+  // photo. Null for text-only messages and outbound replies.
+  mediaUrl    String?
   workerId    String?
   worker      Worker?          @relation(fields: [workerId], references: [id], onDelete: SetNull)
   receivedAt  DateTime         @default(now())

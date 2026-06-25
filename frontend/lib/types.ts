@@ -73,6 +73,7 @@ export interface IncomingMessage {
   messageBody: string;
   channel: MessageChannel;
   direction: MessageDirection;
+  mediaUrl: string | null;
   receivedAt: string;
   isRead: boolean;
   workerName: string | null;
