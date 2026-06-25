@@ -1382,6 +1382,88 @@ adminRouter.delete("/board/cell", async (req: Request, res: Response): Promise<v
   res.json({ ok: true });
 });
 
+/** Lightweight error carrying an HTTP status, thrown inside a transaction. */
+class HttpError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+  }
+}
+
+/**
+ * PUT /api/admin/shifts/:id/move — drag-and-drop a shift block to a new day
+ * and/or worker. `:id` is the RotaCell id; body: { workerId, date }.
+ *
+ * rota_cells is uniquely keyed on (workerId, date), so the move runs in a
+ * transaction: a blank/AVAILABLE cell already at the destination is overwritten,
+ * but an occupied destination (another shift or an unavailable status) is a 409.
+ * Any move resets `confirmed` to false — the relocated shift must be re-acknowledged.
+ */
+adminRouter.put("/shifts/:id/move", async (req: Request, res: Response): Promise<void> => {
+  const id = String(req.params.id);
+  const workerId = String(req.body?.workerId ?? "");
+  const dateStr = String(req.body?.date ?? "");
+  if (!workerId || !dateStr) {
+    res.status(400).json({ error: "workerId and date are required" });
+    return;
+  }
+  const date = dateOnlyUTC(dateStr);
+
+  try {
+    const moved = await prisma.$transaction(async (tx) => {
+      const source = await tx.rotaCell.findUnique({ where: { id } });
+      if (!source) throw new HttpError(404, "Shift not found.");
+
+      // No-op move onto the same slot.
+      if (source.workerId === workerId && ymdFromUTC(source.date) === dateStr) {
+        return source;
+      }
+
+      // Reassigning a SCHEDULED shift to a worker with expired Right to Work is blocked.
+      if (source.status === "SCHEDULED" && (await rtwExpiredNames([workerId])).length) {
+        throw new HttpError(422, "Cannot move shift: Worker's Right to Work has expired.");
+      }
+
+      // Destination occupancy (unique workerId+date): overwrite only if blank.
+      const dest = await tx.rotaCell.findUnique({
+        where: { workerId_date: { workerId, date } },
+      });
+      if (dest && dest.id !== id) {
+        const blank = dest.status === "AVAILABLE" && !dest.startTime && !dest.label;
+        if (!blank) throw new HttpError(409, "That day already has a shift for this worker.");
+        await tx.rotaCell.delete({ where: { id: dest.id } });
+      }
+
+      return tx.rotaCell.update({
+        where: { id },
+        data: { workerId, date, confirmed: false },
+      });
+    });
+
+    emitRotaEvent({ type: "board.updated", payload: { workerId, date: dateStr } });
+    res.json({
+      ok: true,
+      cell: {
+        id: moved.id,
+        workerId: moved.workerId,
+        date: ymdFromUTC(moved.date),
+        status: moved.status,
+        confirmed: moved.confirmed,
+        label: moved.label,
+        startTime: moved.startTime,
+        endTime: moved.endTime,
+        clientId: moved.clientId,
+      },
+    });
+  } catch (err) {
+    if (err instanceof HttpError) {
+      res.status(err.status).json({ error: err.message });
+      return;
+    }
+    console.error("[shifts/move] error:", err);
+    res.status(500).json({ error: "Could not move shift." });
+  }
+});
+
 /**
  * POST /api/admin/board/cancel — cancel a shift and text the worker.
  * Body: { workerId, date, clientId? }

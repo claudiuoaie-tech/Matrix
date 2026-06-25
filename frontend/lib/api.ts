@@ -5,6 +5,7 @@ import { getAdminKey } from "./adminSession";
 import type {
   AdminWorker,
   AvailabilityCell,
+  BoardCell,
   BoardResponse,
   ClientLite,
   ClientPool,
@@ -304,6 +305,12 @@ export const admin = {
       method: "PUT",
       admin: true,
       body: { ...cell, silent },
+    }),
+  moveShift: (cellId: string, workerId: string, date: string) =>
+    request<{ ok: boolean; cell: BoardCell }>(`/api/admin/shifts/${cellId}/move`, {
+      method: "PUT",
+      admin: true,
+      body: { workerId, date },
     }),
   setCells: (cells: CellInput[], silent = false) =>
     request<{ ok: boolean; count: number; smsSent: number }>("/api/admin/board/cells", {

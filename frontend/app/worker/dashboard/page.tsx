@@ -17,6 +17,8 @@ import {
   Plus,
   Lock,
   AlertCircle,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { auth, worker as workerApi, ApiError } from "@/lib/api";
 import { clearSession, getCachedWorker, getToken } from "@/lib/session";
@@ -143,17 +145,52 @@ export default function WorkerDashboard() {
 // My Rota — 14-day self-service status
 // ---------------------------------------------------------------------------
 
+// Worker availability planning window: up to 8 weeks ahead (Phase 3).
+const ROTA_FORWARD_WEEKS = 8;
+
+/** Today's local calendar date as YYYY-MM-DD. */
+function rotaTodayKey(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+/** The Monday (YYYY-MM-DD) of the week containing the given key. */
+function rotaMondayOf(ymd: string): string {
+  const d = new Date(`${ymd}T00:00:00Z`);
+  const dow = (d.getUTCDay() + 6) % 7;
+  d.setUTCDate(d.getUTCDate() - dow);
+  return d.toISOString().slice(0, 10);
+}
+
 function MyRotaTab() {
   const [board, setBoard] = useState<WorkerBoardResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<string | null>(null);
 
+  // Week navigation — page the 2-week window from the current week up to 8
+  // weeks ahead. Initialised client-side (no SSR date mismatch in this tab).
+  const [weekStart, setWeekStart] = useState<string>(() => rotaMondayOf(rotaTodayKey()));
+  const currentMonday = rotaMondayOf(rotaTodayKey());
+  const maxWeekStart = addDaysStr(currentMonday, ROTA_FORWARD_WEEKS * 7);
+  const canPrev = weekStart > currentMonday;
+  const canNext = weekStart < maxWeekStart;
+
+  function shiftWeek(weeks: number) {
+    setWeekStart((cur) => {
+      const next = addDaysStr(cur, weeks * 7);
+      if (next < currentMonday) return currentMonday;
+      if (next > maxWeekStart) return maxWeekStart;
+      return next;
+    });
+  }
+
   const load = useCallback(() => {
+    setLoading(true);
     workerApi
-      .board()
+      .board(weekStart)
       .then(setBoard)
       .finally(() => setLoading(false));
-  }, []);
+  }, [weekStart]);
 
   useEffect(load, [load]);
 
@@ -181,10 +218,35 @@ function MyRotaTab() {
 
   return (
     <section>
-      <h2 className="font-semibold mb-1">My rota — next 2 weeks</h2>
+      <h2 className="font-semibold mb-1">My rota</h2>
       <p className="text-sm text-muted mb-3">
-        Set your status for any day. Scheduled shifts are set by the office.
+        Set your availability up to {ROTA_FORWARD_WEEKS} weeks ahead. Scheduled shifts are set
+        by the office.
       </p>
+
+      {/* Week navigation */}
+      <div className="mb-3 flex items-center justify-between gap-2 rounded-xl border border-border bg-card p-2">
+        <button
+          onClick={() => shiftWeek(-1)}
+          disabled={!canPrev}
+          className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-sm font-medium text-muted transition hover:text-foreground disabled:opacity-40"
+        >
+          <ChevronLeft size={16} /> Prev
+        </button>
+        <span className="text-sm font-semibold">
+          {board.days.length
+            ? `${dateLabel(board.days[0])} – ${dateLabel(board.days[board.days.length - 1])}`
+            : ""}
+        </span>
+        <button
+          onClick={() => shiftWeek(1)}
+          disabled={!canNext}
+          className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-sm font-medium text-muted transition hover:text-foreground disabled:opacity-40"
+        >
+          Next <ChevronRight size={16} />
+        </button>
+      </div>
+
       <div className="space-y-2">
         {board.days.map((d) => {
           const cell = board.cells[d];

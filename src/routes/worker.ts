@@ -341,6 +341,17 @@ workerRouter.put("/board/cell", async (req: Request, res: Response): Promise<voi
   }
 
   const date = dateOnlyUTC(dateStr);
+
+  // Availability can be set up to 8 weeks ahead — matches the portal window and
+  // keeps future rows bounded.
+  const MAX_AHEAD_DAYS = 56;
+  const todayUTC = dateOnlyUTC(ymdFromUTC(new Date()));
+  const maxDate = new Date(todayUTC.getTime() + MAX_AHEAD_DAYS * 86_400_000);
+  if (date > maxDate) {
+    res.status(400).json({ error: "You can only set your availability up to 8 weeks ahead." });
+    return;
+  }
+
   const workerId = req.worker!.id;
   const cell = await prisma.rotaCell.upsert({
     where: { workerId_date: { workerId, date } },

@@ -27,6 +27,8 @@ import {
   ArrowUpAZ,
   Search,
   CheckCheck,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { admin, CellInput } from "@/lib/api";
 import type {
@@ -58,6 +60,30 @@ const HEADER_H = 34;
 
 // Frozen-pane shadow on the right edge of the sticky name columns.
 const STICKY_SHADOW = "6px 0 10px -6px rgba(15,23,42,0.18)";
+
+// How many weeks ahead of the current week the admin may navigate (Phase 3).
+// Backward navigation is unbounded.
+const MAX_FORWARD_WEEKS = 8;
+
+/** Today's local calendar date as YYYY-MM-DD. */
+function todayKey(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+/** Add n days to a YYYY-MM-DD key (UTC math, returns YYYY-MM-DD). */
+function addDays(ymd: string, n: number): string {
+  const d = new Date(`${ymd}T00:00:00Z`);
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+}
+/** The Monday (YYYY-MM-DD) of the week containing the given key. */
+function mondayOf(ymd: string): string {
+  const d = new Date(`${ymd}T00:00:00Z`);
+  const dow = (d.getUTCDay() + 6) % 7; // 0 = Monday
+  d.setUTCDate(d.getUTCDate() - dow);
+  return d.toISOString().slice(0, 10);
+}
 
 // Pre-configured Twilio text templates for the grid-level broadcast.
 const SMS_TEMPLATES: { id: string; label: string; body: string }[] = [
@@ -233,6 +259,31 @@ export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }
   // View filter: current week (7 days) vs. full fortnight (14 days).
   const [view, setView] = useState<"week" | "fortnight">("week");
 
+  // Phase 3 — week navigation. `weekStart` is the Monday of the fetched window;
+  // the board returns a 14-day window from it. Backward is unbounded; forward is
+  // capped at MAX_FORWARD_WEEKS. Initialised client-side (this grid only mounts
+  // after the admin auth gate, so there's no SSR/hydration date mismatch).
+  const [weekStart, setWeekStart] = useState<string>(() => mondayOf(todayKey()));
+  const currentMonday = mondayOf(todayKey());
+  const maxWeekStart = addDays(currentMonday, MAX_FORWARD_WEEKS * 7);
+  const canGoNext = weekStart < maxWeekStart;
+
+  // Phase 3 — drag-and-drop. `dragSrc` is the shift being dragged; `dragOver` is
+  // the `workerId|date` cell currently hovered as a drop target.
+  const [dragSrc, setDragSrc] = useState<{
+    cellId: string;
+    workerId: string;
+    date: string;
+  } | null>(null);
+  const [dragOver, setDragOver] = useState<string | null>(null);
+
+  function shiftWeek(weeks: number) {
+    setWeekStart((cur) => {
+      const next = addDays(cur, weeks * 7);
+      return next > maxWeekStart ? maxWeekStart : next;
+    });
+  }
+
   // Grid-level SMS broadcast.
   const [selectMode, setSelectMode] = useState(false);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -288,8 +339,11 @@ export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }
   }, []);
 
   const loadBoard = useCallback(() => {
-    admin.board(clientId || undefined).then(setBoard).finally(() => setLoading(false));
-  }, [clientId]);
+    admin
+      .board(clientId || undefined, weekStart || undefined)
+      .then(setBoard)
+      .finally(() => setLoading(false));
+  }, [clientId, weekStart]);
 
   useEffect(() => {
     if (!clientId) return;
@@ -507,6 +561,94 @@ export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }
     await admin.clearCell(workerId, date);
     setEditor(null);
     loadBoard();
+  }
+
+  // ---- Drag-and-drop shift moves (Phase 3) ----------------------------------
+  // Native HTML5 DnD: a SCHEDULED cell is draggable; any blank / AVAILABLE cell
+  // is a drop target. Disabled while Quick-Match / Bulk / Paste modes are on, so
+  // it never clashes with the existing mouse-drag cell selection.
+  const dndEnabled = !selectMode && !bulkMode && !pasteMode;
+
+  function canDropOn(workerId: string, date: string, cell: BoardCell | null): boolean {
+    if (!dragSrc) return false;
+    if (dragSrc.workerId === workerId && dragSrc.date === date) return false;
+    return !cell || cell.status === "AVAILABLE";
+  }
+
+  function onShiftDragStart(
+    e: React.DragEvent,
+    workerId: string,
+    date: string,
+    cell: BoardCell | null
+  ) {
+    if (!dndEnabled || !cell || cell.status !== "SCHEDULED") return;
+    setDragSrc({ cellId: cell.id, workerId, date });
+    e.dataTransfer.effectAllowed = "move";
+    try {
+      e.dataTransfer.setData("text/plain", cell.id);
+    } catch {
+      /* some browsers require setData to be wrapped */
+    }
+  }
+
+  function onCellDragOver(
+    e: React.DragEvent,
+    workerId: string,
+    date: string,
+    cell: BoardCell | null
+  ) {
+    if (!dndEnabled || !canDropOn(workerId, date, cell)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    const k = selKey(workerId, date);
+    if (dragOver !== k) setDragOver(k);
+  }
+
+  function onCellDrop(
+    e: React.DragEvent,
+    workerId: string,
+    date: string,
+    cell: BoardCell | null
+  ) {
+    if (!dndEnabled || !canDropOn(workerId, date, cell)) return;
+    e.preventDefault();
+    void moveShift(workerId, date);
+  }
+
+  function onShiftDragEnd() {
+    setDragSrc(null);
+    setDragOver(null);
+  }
+
+  async function moveShift(dstWorkerId: string, dstDate: string) {
+    const src = dragSrc;
+    setDragSrc(null);
+    setDragOver(null);
+    if (!src || !board) return;
+    const movingCell = board.workers.find((w) => w.id === src.workerId)?.cells[src.date];
+    if (!movingCell) return;
+
+    // Optimistic: relocate the cell in local state immediately.
+    setBoard((prev) => {
+      if (!prev) return prev;
+      const moved: BoardCell = { ...movingCell, confirmed: false };
+      const workers = prev.workers.map((w) => {
+        if (w.id !== src.workerId && w.id !== dstWorkerId) return w;
+        const cells = { ...w.cells };
+        if (w.id === src.workerId) delete cells[src.date];
+        if (w.id === dstWorkerId) cells[dstDate] = moved;
+        return { ...w, cells };
+      });
+      return { ...prev, workers };
+    });
+
+    try {
+      await admin.moveShift(movingCell.id, dstWorkerId, dstDate);
+      flashMsg("Shift moved");
+    } catch (err) {
+      flashMsg(err instanceof Error ? err.message : "Move failed — reverting");
+      loadBoard(); // revert to server truth
+    }
   }
 
   function handleCellClick(
@@ -792,6 +934,41 @@ export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }
               </option>
             ))}
           </select>
+        </div>
+
+        {/* Phase 3 — week navigation (backward unbounded, forward capped) */}
+        <div className="inline-flex items-center gap-0.5 rounded-xl border border-slate-200 bg-slate-50/60 p-0.5">
+          <button
+            onClick={() => shiftWeek(-1)}
+            title="Previous week"
+            className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-sm font-medium text-slate-500 transition-all hover:bg-white hover:text-indigo-600"
+          >
+            <ChevronLeft size={15} /> Prev
+          </button>
+          <input
+            type="date"
+            value={weekStart}
+            onChange={(e) => e.target.value && setWeekStart(mondayOf(e.target.value))}
+            title="Jump to a week"
+            className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-medium text-slate-600 outline-none focus:border-indigo-300 focus:ring-2 focus:ring-indigo-100"
+          />
+          <button
+            onClick={() => shiftWeek(1)}
+            disabled={!canGoNext}
+            title={canGoNext ? "Next week" : `Up to ${MAX_FORWARD_WEEKS} weeks ahead`}
+            className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 text-sm font-medium text-slate-500 transition-all hover:bg-white hover:text-indigo-600 disabled:opacity-40 disabled:hover:bg-transparent"
+          >
+            Next <ChevronRight size={15} />
+          </button>
+          {weekStart !== currentMonday && (
+            <button
+              onClick={() => setWeekStart(currentMonday)}
+              title="Back to the current week"
+              className="rounded-lg px-2 py-1.5 text-xs font-semibold text-indigo-600 transition-all hover:bg-white"
+            >
+              This week
+            </button>
+          )}
         </div>
 
         {/* View filter: week vs fortnight */}
@@ -1211,14 +1388,25 @@ export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }
                       const selectable = selectMode && isSelectable(cell);
                       const showBox = selectMode || bulkMode;
                       const cellChecked = selectMode ? quickChecked : bulkChecked;
+                      // Phase 3 drag-and-drop flags for this cell.
+                      const draggable = dndEnabled && cell?.status === "SCHEDULED";
+                      const isDragOver = dndEnabled && dragOver === key;
+                      const isDragging = !!cell && dragSrc?.cellId === cell.id;
                       return (
                         <Fragment2 key={d}>
                           {/* Sub-column 1: status / shift (+ selection checkbox) */}
                           <td
+                            draggable={draggable}
+                            onDragStart={(e) => onShiftDragStart(e, w.id, d, cell)}
+                            onDragEnd={onShiftDragEnd}
+                            onDragOver={(e) => onCellDragOver(e, w.id, d, cell)}
+                            onDrop={(e) => onCellDrop(e, w.id, d, cell)}
                             onClick={(e) => handleCellClick(e, w.id, w.name, d, cell)}
                             onMouseDown={(e) => onCellMouseDown(e, w.id, d, cell)}
                             onMouseEnter={() => onCellMouseEnter(w.id, d, cell)}
                             className={`p-1.5 align-middle transition-all duration-200 ${
+                              draggable ? "cursor-grab active:cursor-grabbing" : ""
+                            } ${
                               selectMode
                                 ? selectable
                                   ? "cursor-pointer hover:bg-indigo-50/60"
@@ -1229,14 +1417,18 @@ export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }
                             }`}
                             style={{
                               height: 40,
-                              background: bulkChecked
+                              background: isDragOver
+                                ? "#e0e7ff"
+                                : bulkChecked
                                 ? "#d1fae5"
                                 : quickChecked
                                 ? "#eef2ff"
                                 : isWeekend(d) && !cell
                                 ? "#fafbfc"
                                 : undefined,
-                              boxShadow: active
+                              boxShadow: isDragOver
+                                ? "inset 0 0 0 2px #6366f1"
+                                : active
                                 ? "inset 0 0 0 2px #6366f1"
                                 : bulkChecked
                                 ? "inset 0 0 0 1.5px #34d399"
@@ -1244,7 +1436,7 @@ export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }
                                 ? "inset 0 0 0 1.5px #818cf8"
                                 : undefined,
                               borderBottom: "1px solid #f1f5f9",
-                              opacity: selectMode && !selectable ? 0.45 : 1,
+                              opacity: isDragging ? 0.4 : selectMode && !selectable ? 0.45 : 1,
                             }}
                           >
                             <div className="flex items-center gap-1.5">
