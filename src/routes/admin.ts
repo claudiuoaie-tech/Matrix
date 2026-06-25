@@ -263,9 +263,10 @@ adminRouter.get("/rota", async (req: Request, res: Response): Promise<void> => {
 // Worker CRUD
 // ----------------------------------------------------------------------------
 
-/** GET /api/admin/workers — every worker with allocation/holiday counts. */
+/** GET /api/admin/workers — every (non-deleted) worker with counts. */
 adminRouter.get("/workers", async (_req: Request, res: Response): Promise<void> => {
   const workers = await prisma.worker.findMany({
+    where: { deletedAt: null },
     orderBy: [{ status: "asc" }, { name: "asc" }],
     include: {
       _count: { select: { allocations: true, holidays: true, documents: true } },
@@ -403,6 +404,91 @@ adminRouter.put("/workers/:id", async (req: Request, res: Response): Promise<voi
   emitRotaEvent({ type: "worker.updated", payload: { workerId: id } });
   res.json(updated);
 });
+
+/**
+ * DELETE /api/admin/workers/:id — soft-delete a worker.
+ *
+ * We never hard-delete: a worker's RotaCells and Allocations are the source of
+ * truth for historical rota/financial reporting, so we mark `deletedAt`, flip
+ * the worker INACTIVE and revoke their sessions. The worker vanishes from admin
+ * lists, the board, broadcasts and login, but all history is preserved.
+ */
+adminRouter.delete("/workers/:id", async (req: Request, res: Response): Promise<void> => {
+  const id = req.params.id;
+  const worker = await prisma.worker.findUnique({ where: { id } });
+  if (!worker || worker.deletedAt) {
+    res.status(404).json({ error: "Worker not found" });
+    return;
+  }
+
+  await prisma.worker.update({
+    where: { id },
+    data: { deletedAt: new Date(), status: "INACTIVE" },
+  });
+  await revokeSessions(id);
+
+  // Free any upcoming proposed/confirmed slots so the shift can be re-filled.
+  const affected = await prisma.allocation.findMany({
+    where: {
+      workerId: id,
+      state: { in: ["PROPOSED", "CONFIRMED"] },
+      shift: { date: { gte: startOfDay(new Date()) } },
+    },
+    select: { id: true, shiftId: true },
+  });
+  if (affected.length) {
+    await prisma.allocation.updateMany({
+      where: { id: { in: affected.map((a) => a.id) } },
+      data: { state: "DECLINED" },
+    });
+    for (const a of affected) {
+      emitRotaEvent({
+        type: "allocation.updated",
+        payload: { allocationId: a.id, shiftId: a.shiftId, state: "DECLINED" },
+      });
+    }
+  }
+
+  emitRotaEvent({ type: "worker.updated", payload: { workerId: id } });
+  res.json({ ok: true });
+});
+
+/**
+ * POST /api/admin/workers/bulk-allocate
+ * Body: { workerIds: string[], clientId: string }
+ * Re-points each worker's pool to the destination client's pool in one
+ * transaction (used for bulk manual workflows and post-CSV-import mapping).
+ */
+adminRouter.post(
+  "/workers/bulk-allocate",
+  async (req: Request, res: Response): Promise<void> => {
+    const workerIds = Array.isArray(req.body?.workerIds)
+      ? req.body.workerIds.filter((x: unknown): x is string => typeof x === "string")
+      : [];
+    const clientId = String(req.body?.clientId ?? "");
+    if (workerIds.length === 0 || !clientId) {
+      res.status(400).json({ error: "workerIds (non-empty) and clientId are required" });
+      return;
+    }
+
+    const client = await prisma.client.findUnique({
+      where: { id: clientId },
+      select: { pool: true },
+    });
+    if (!client) {
+      res.status(404).json({ error: "Client not found" });
+      return;
+    }
+
+    const result = await prisma.worker.updateMany({
+      where: { id: { in: workerIds }, deletedAt: null },
+      data: { clientPool: client.pool },
+    });
+
+    emitRotaEvent({ type: "worker.updated", payload: { bulk: result.count } });
+    res.json({ ok: true, updated: result.count, pool: client.pool });
+  }
+);
 
 // ----------------------------------------------------------------------------
 // CSV import / export
@@ -554,7 +640,7 @@ adminRouter.post("/workers/import", async (req: Request, res: Response): Promise
  */
 adminRouter.get("/workers/export", async (_req: Request, res: Response): Promise<void> => {
   const workers = await prisma.worker.findMany({
-    where: { status: "ACTIVE" },
+    where: { status: "ACTIVE", deletedAt: null },
     orderBy: { name: "asc" },
   });
 
@@ -740,6 +826,7 @@ adminRouter.get(
     const workers = await prisma.worker.findMany({
       where: {
         status: "ACTIVE",
+        deletedAt: null,
         ...(pool && POOLS.includes(pool as ClientPool)
           ? { clientPool: pool as ClientPool }
           : {}),
@@ -812,7 +899,7 @@ adminRouter.post("/broadcast", async (req: Request, res: Response): Promise<void
   }
 
   const workers = await prisma.worker.findMany({
-    where: { id: { in: workerIds }, status: "ACTIVE" },
+    where: { id: { in: workerIds }, status: "ACTIVE", deletedAt: null },
   });
 
   // Dispatch to every recipient on the chosen channel (SMS or WhatsApp).
@@ -1070,14 +1157,110 @@ adminRouter.delete(
 // Clients (for the board filter dropdown)
 // ----------------------------------------------------------------------------
 
-/** GET /api/admin/clients — clients with their pool, for the board filter. */
+/**
+ * GET /api/admin/clients — active clients with pool, phone and a live count of
+ * the workers currently in each client's pool.
+ */
 adminRouter.get("/clients", async (_req: Request, res: Response): Promise<void> => {
   const clients = await prisma.client.findMany({
     where: { status: "ACTIVE" },
     orderBy: { companyName: "asc" },
-    select: { id: true, companyName: true, address: true, pool: true },
+    select: { id: true, companyName: true, address: true, phone: true, pool: true },
   });
-  res.json(clients);
+
+  // Worker headcount per pool (non-deleted) → attach to each client.
+  const grouped = await prisma.worker.groupBy({
+    by: ["clientPool"],
+    where: { deletedAt: null },
+    _count: { _all: true },
+  });
+  const poolCount = new Map(grouped.map((g) => [g.clientPool, g._count._all]));
+
+  res.json(
+    clients.map((c) => ({ ...c, workerCount: poolCount.get(c.pool) ?? 0 }))
+  );
+});
+
+/** POST /api/admin/clients — create a client (name, address, phone, pool). */
+adminRouter.post("/clients", async (req: Request, res: Response): Promise<void> => {
+  const companyName = String(req.body?.companyName ?? "").trim();
+  const address = String(req.body?.address ?? "").trim();
+  const phone = req.body?.phone != null ? String(req.body.phone).trim() : "";
+  const poolRaw = String(req.body?.pool ?? "POOL_A");
+  if (!companyName || !address) {
+    res.status(400).json({ error: "companyName and address are required" });
+    return;
+  }
+  const pool = POOLS.includes(poolRaw as ClientPool) ? (poolRaw as ClientPool) : "POOL_A";
+
+  const client = await prisma.client.create({
+    data: { companyName, address, phone: phone || null, pool },
+  });
+  res.status(201).json(client);
+});
+
+/** PUT /api/admin/clients/:id — edit name, address, phone and/or pool. */
+adminRouter.put("/clients/:id", async (req: Request, res: Response): Promise<void> => {
+  const id = req.params.id;
+  const client = await prisma.client.findUnique({ where: { id } });
+  if (!client) {
+    res.status(404).json({ error: "Client not found" });
+    return;
+  }
+
+  const data: {
+    companyName?: string;
+    address?: string;
+    phone?: string | null;
+    pool?: ClientPool;
+  } = {};
+  if (req.body?.companyName != null) {
+    const v = String(req.body.companyName).trim();
+    if (v) data.companyName = v;
+  }
+  if (req.body?.address != null) {
+    const v = String(req.body.address).trim();
+    if (v) data.address = v;
+  }
+  if (req.body?.phone !== undefined) {
+    const v = String(req.body.phone ?? "").trim();
+    data.phone = v || null;
+  }
+  if (req.body?.pool != null && POOLS.includes(req.body.pool)) {
+    data.pool = req.body.pool;
+  }
+
+  const updated = await prisma.client.update({ where: { id }, data });
+  res.json(updated);
+});
+
+/**
+ * DELETE /api/admin/clients/:id — delete a client, with a strict safety check:
+ * refuse (409) if any shifts are still assigned to them so historical/active
+ * rota data is never silently cascaded away.
+ */
+adminRouter.delete("/clients/:id", async (req: Request, res: Response): Promise<void> => {
+  const id = req.params.id;
+  const client = await prisma.client.findUnique({ where: { id } });
+  if (!client) {
+    res.status(404).json({ error: "Client not found" });
+    return;
+  }
+
+  const shiftCount = await prisma.shift.count({ where: { clientId: id } });
+  if (shiftCount > 0) {
+    res.status(409).json({
+      error: `Cannot delete: ${shiftCount} shift${
+        shiftCount === 1 ? " is" : "s are"
+      } still assigned to this client. Reassign or remove them first.`,
+    });
+    return;
+  }
+
+  // No shifts → safe to remove. RotaCell.clientId is SetNull on delete, so any
+  // board cells referencing this client are nullified rather than destroyed.
+  await prisma.client.delete({ where: { id } });
+  res.json({ ok: true });
 });
 
 // ----------------------------------------------------------------------------
@@ -1125,6 +1308,7 @@ adminRouter.get("/board", async (req: Request, res: Response): Promise<void> => 
   const workers = await prisma.worker.findMany({
     where: {
       status: { in: ["ACTIVE", "SUSPENDED"] },
+      deletedAt: null,
       ...(client ? { clientPool: client.pool } : {}),
     },
     orderBy: { name: "asc" },

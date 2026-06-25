@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Loader2,
   Plus,
@@ -22,6 +22,7 @@ import {
 import { admin } from "@/lib/api";
 import type {
   AdminWorker,
+  ClientLite,
   ClientPool,
   DocType,
   ImportSummary,
@@ -94,11 +95,20 @@ function statusClass(status: WorkerStatus): string {
 
 export default function WorkersManager() {
   const [workers, setWorkers] = useState<AdminWorker[]>([]);
+  const [clients, setClients] = useState<ClientLite[]>([]);
   const [loading, setLoading] = useState(true);
   const [editing, setEditing] = useState<AdminWorker | null>(null);
   const [creating, setCreating] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [now, setNow] = useState<number | null>(null);
+
+  // Bulk select + allocate-to-client (Phase 4).
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkClientId, setBulkClientId] = useState("");
+  const [allocating, setAllocating] = useState(false);
+  // Soft-delete confirmation target.
+  const [deleteTarget, setDeleteTarget] = useState<AdminWorker | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   // CSV import/export state.
   const [importing, setImporting] = useState(false);
@@ -114,9 +124,76 @@ export default function WorkersManager() {
       .workers()
       .then(setWorkers)
       .finally(() => setLoading(false));
+    admin.clients().then(setClients);
   }, []);
 
   useEffect(load, [load]);
+
+  // Real client name(s) for a pool (Phase 4) — replaces the "Client A/B/C"
+  // placeholder labels. Falls back to the generic label if no client maps yet.
+  const poolName = useMemo(() => {
+    const m: Record<string, string> = {};
+    for (const c of clients) {
+      m[c.pool] = m[c.pool] ? `${m[c.pool]}, ${c.companyName}` : c.companyName;
+    }
+    return m;
+  }, [clients]);
+  const clientLabel = useCallback(
+    (pool: ClientPool) => poolName[pool] ?? POOL_LABELS[pool],
+    [poolName]
+  );
+
+  // Drop selections that no longer exist after a reload.
+  useEffect(() => {
+    setSelected((prev) => {
+      const live = new Set(workers.map((w) => w.id));
+      let changed = false;
+      const next = new Set<string>();
+      for (const id of prev) {
+        if (live.has(id)) next.add(id);
+        else changed = true;
+      }
+      return changed ? next : prev;
+    });
+  }, [workers]);
+
+  const allSelected = workers.length > 0 && workers.every((w) => selected.has(w.id));
+  function toggleAll() {
+    setSelected(allSelected ? new Set() : new Set(workers.map((w) => w.id)));
+  }
+  function toggleOne(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  async function bulkAllocate() {
+    if (!bulkClientId || selected.size === 0) return;
+    setAllocating(true);
+    try {
+      await admin.bulkAllocateWorkers([...selected], bulkClientId);
+      setSelected(new Set());
+      setBulkClientId("");
+      load();
+    } finally {
+      setAllocating(false);
+    }
+  }
+
+  async function confirmDelete() {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    try {
+      await admin.deleteWorker(deleteTarget.id);
+      setDeleteTarget(null);
+      load();
+    } finally {
+      setDeleting(false);
+    }
+  }
 
   async function setStatus(w: AdminWorker, status: WorkerStatus) {
     setBusyId(w.id);
@@ -227,13 +304,62 @@ export default function WorkersManager() {
         </p>
       )}
 
+      {/* Bulk allocate toolbar (Phase 4) */}
+      {selected.size > 0 && (
+        <div className="flex flex-wrap items-center gap-3 border-b border-indigo-100 bg-indigo-50/60 px-5 py-2.5">
+          <span className="text-sm font-semibold text-indigo-700">
+            {selected.size} selected
+          </span>
+          <span className="text-slate-300">·</span>
+          <label className="text-xs font-medium text-muted">Allocate to client</label>
+          <select
+            value={bulkClientId}
+            onChange={(e) => setBulkClientId(e.target.value)}
+            className="rounded-lg border border-border bg-white px-2.5 py-1.5 text-sm outline-none focus:border-brand"
+          >
+            <option value="">Choose a client…</option>
+            {clients.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.companyName}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={bulkAllocate}
+            disabled={!bulkClientId || allocating}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-brand px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+          >
+            {allocating ? <Loader2 size={14} className="animate-spin" /> : null}
+            Allocate to client
+          </button>
+          <button
+            onClick={() => setSelected(new Set())}
+            className="text-sm font-medium text-slate-500 hover:text-slate-700"
+          >
+            Clear
+          </button>
+        </div>
+      )}
+
       <div className="overflow-x-auto thin-scroll">
         <table className="w-full text-sm">
           <thead>
             <tr className="text-left text-xs uppercase tracking-wide text-muted">
+              <th className="px-3 py-2 font-medium">
+                <input
+                  type="checkbox"
+                  checked={allSelected}
+                  ref={(el) => {
+                    if (el) el.indeterminate = selected.size > 0 && !allSelected;
+                  }}
+                  onChange={toggleAll}
+                  aria-label="Select all workers"
+                  className="h-4 w-4 accent-[var(--brand)]"
+                />
+              </th>
               <th className="px-5 py-2 font-medium">Name</th>
               <th className="px-5 py-2 font-medium">Phone</th>
-              <th className="px-5 py-2 font-medium">Pool</th>
+              <th className="px-5 py-2 font-medium">Client</th>
               <th className="px-5 py-2 font-medium">Skills</th>
               <th className="px-5 py-2 font-medium">Status</th>
               <th className="px-5 py-2 font-medium">RTW Expiry</th>
@@ -242,10 +368,24 @@ export default function WorkersManager() {
           </thead>
           <tbody>
             {workers.map((w) => (
-              <tr key={w.id} className="border-t border-border">
+              <tr
+                key={w.id}
+                className={`border-t border-border ${
+                  selected.has(w.id) ? "bg-indigo-50/50" : ""
+                }`}
+              >
+                <td className="px-3 py-2.5">
+                  <input
+                    type="checkbox"
+                    checked={selected.has(w.id)}
+                    onChange={() => toggleOne(w.id)}
+                    aria-label={`Select ${w.name}`}
+                    className="h-4 w-4 accent-[var(--brand)]"
+                  />
+                </td>
                 <td className="px-5 py-2.5 font-medium">{w.name}</td>
                 <td className="px-5 py-2.5 font-mono text-xs text-muted">{w.phone}</td>
-                <td className="px-5 py-2.5">{POOL_LABELS[w.clientPool]}</td>
+                <td className="px-5 py-2.5">{clientLabel(w.clientPool)}</td>
                 <td className="px-5 py-2.5">
                   <SkillTags skills={w.skills ?? []} />
                 </td>
@@ -307,6 +447,13 @@ export default function WorkersManager() {
                         <UserX size={14} />
                       </button>
                     )}
+                    <button
+                      onClick={() => setDeleteTarget(w)}
+                      title="Delete worker"
+                      className="rounded-md border border-rose-200 p-1.5 text-rose-600 hover:bg-rose-50"
+                    >
+                      <Trash2 size={14} />
+                    </button>
                   </div>
                 </td>
               </tr>
@@ -318,6 +465,7 @@ export default function WorkersManager() {
       {(editing || creating) && (
         <WorkerModal
           worker={editing}
+          clients={clients}
           onClose={() => {
             setEditing(null);
             setCreating(false);
@@ -328,6 +476,45 @@ export default function WorkersManager() {
             load();
           }}
         />
+      )}
+
+      {/* Delete confirmation (soft-delete) */}
+      {deleteTarget && (
+        <div className="fixed inset-0 z-[60] grid place-items-center bg-black/40 p-4">
+          <div className="w-full max-w-sm rounded-2xl bg-card p-5 shadow-xl">
+            <div className="mb-2 flex items-center gap-2">
+              <span className="grid h-9 w-9 place-items-center rounded-full bg-rose-100 text-rose-600">
+                <AlertTriangle size={18} />
+              </span>
+              <h3 className="font-semibold">Remove worker?</h3>
+            </div>
+            <p className="mb-1 text-sm text-foreground">
+              Are you sure you want to permanently remove{" "}
+              <span className="font-semibold">{deleteTarget.name}</span>?
+            </p>
+            <p className="mb-4 text-xs text-muted">
+              They&apos;ll be removed from all lists, the rota board and broadcasts. Their past
+              rota and allocation history is preserved for reporting.
+            </p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setDeleteTarget(null)}
+                disabled={deleting}
+                className="rounded-lg border border-border px-3 py-2 text-sm font-medium text-muted hover:bg-slate-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmDelete}
+                disabled={deleting}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-2 text-sm font-medium text-white hover:bg-rose-700 disabled:opacity-50"
+              >
+                {deleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
+                Remove worker
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Import loading overlay */}
@@ -420,13 +607,20 @@ function Stat({
 
 function WorkerModal({
   worker,
+  clients,
   onClose,
   onSaved,
 }: {
   worker: AdminWorker | null;
+  clients: ClientLite[];
   onClose: () => void;
   onSaved: () => void;
 }) {
+  // Real client name per pool for the dropdown (falls back to the generic label).
+  const poolName: Record<string, string> = {};
+  for (const c of clients) {
+    poolName[c.pool] = poolName[c.pool] ? `${poolName[c.pool]}, ${c.companyName}` : c.companyName;
+  }
   const [name, setName] = useState(worker?.name ?? "");
   const [phone, setPhone] = useState(worker?.phone ?? "");
   const [email, setEmail] = useState(worker?.email ?? "");
@@ -508,7 +702,7 @@ function WorkerModal({
             />
           </div>
           <div>
-            <label className="block text-xs font-medium text-muted mb-1">Client pool</label>
+            <label className="block text-xs font-medium text-muted mb-1">Client</label>
             <select
               value={pool}
               onChange={(e) => setPool(e.target.value as ClientPool)}
@@ -516,7 +710,7 @@ function WorkerModal({
             >
               {POOLS.map((p) => (
                 <option key={p} value={p}>
-                  {POOL_LABELS[p]}
+                  {poolName[p] ?? POOL_LABELS[p]}
                 </option>
               ))}
             </select>

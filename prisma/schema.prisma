@@ -118,10 +118,15 @@ model Worker {
   rotaCells     RotaCell[]
   documents     WorkerDocument[]
   messages      IncomingMessage[]
+  // Soft-delete marker. Non-null = "deleted": hidden from admin lists, the board,
+  // broadcasts and login, but the row (and its rota/allocation history) is kept
+  // intact so financial/rota reporting is never corrupted.
+  deletedAt     DateTime?
   createdAt     DateTime         @default(now())
   updatedAt     DateTime         @updatedAt
 
   @@index([status])
+  @@index([deletedAt])
   @@map("workers")
 }
 
@@ -169,6 +174,8 @@ model Client {
   id          String          @id @default(uuid())
   companyName String
   address     String
+  // Main contact number for the site (E.164). Optional.
+  phone       String?
   status      ClientStatus    @default(ACTIVE)
   // The worker pool this client draws temporary staff from.
   pool        ClientPool      @default(POOL_A)

@@ -173,6 +173,30 @@ export const admin = {
       admin: true,
       body: data,
     }),
+  deleteWorker: (id: string) =>
+    request<{ ok: boolean }>(`/api/admin/workers/${id}`, {
+      method: "DELETE",
+      admin: true,
+    }),
+  bulkAllocateWorkers: (workerIds: string[], clientId: string) =>
+    request<{ ok: boolean; updated: number; pool: ClientPool }>(
+      "/api/admin/workers/bulk-allocate",
+      { method: "POST", admin: true, body: { workerIds, clientId } }
+    ),
+
+  // ---- Client CRUD ----
+  createClient: (data: {
+    companyName: string;
+    address: string;
+    phone?: string | null;
+    pool: ClientPool;
+  }) => request<ClientLite>("/api/admin/clients", { method: "POST", admin: true, body: data }),
+  updateClient: (
+    id: string,
+    data: Partial<{ companyName: string; address: string; phone: string | null; pool: ClientPool }>
+  ) => request<ClientLite>(`/api/admin/clients/${id}`, { method: "PUT", admin: true, body: data }),
+  deleteClient: (id: string) =>
+    request<{ ok: boolean }>(`/api/admin/clients/${id}`, { method: "DELETE", admin: true }),
 
   // ---- CSV import / export ----
   importWorkers: (csv: string) =>

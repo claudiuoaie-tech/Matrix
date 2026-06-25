@@ -51,7 +51,7 @@ interface PersonRef {
 
 externalRouter.get("/workers", async (_req: Request, res: Response): Promise<void> => {
   const workers = await prisma.worker.findMany({
-    where: { status: "ACTIVE" },
+    where: { status: "ACTIVE", deletedAt: null },
     orderBy: { name: "asc" },
     select: {
       id: true,
@@ -196,7 +196,7 @@ externalRouter.post(
       );
 
       const poolWorkers = await prisma.worker.findMany({
-        where: { status: "ACTIVE", clientPool: client.pool },
+        where: { status: "ACTIVE", clientPool: client.pool, deletedAt: null },
         orderBy: { name: "asc" },
       });
       const poolIds = poolWorkers.map((w) => w.id);

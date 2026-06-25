@@ -5,6 +5,7 @@ import Link from "next/link";
 import {
   LayoutGrid,
   Users,
+  Building2,
   Radio,
   ArrowLeft,
   Wifi,
@@ -19,9 +20,10 @@ import { getAdminKey, setAdminKey, clearAdminKey } from "@/lib/adminSession";
 import { useRotaEvents } from "@/lib/useRotaEvents";
 import BoardGrid from "@/components/admin/BoardGrid";
 import WorkersManager from "@/components/admin/WorkersManager";
+import ClientsManager from "@/components/admin/ClientsManager";
 import BroadcastEngine from "@/components/admin/BroadcastEngine";
 
-type Tab = "rota" | "workers" | "broadcast";
+type Tab = "rota" | "workers" | "clients" | "broadcast";
 type Gate = "checking" | "out" | "in";
 
 export default function AdminPage() {
@@ -242,6 +244,7 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
   const tabs: { key: Tab; label: string; icon: React.ReactNode; badge?: number }[] = [
     { key: "rota", label: "Rota Board", icon: <LayoutGrid size={16} /> },
     { key: "workers", label: "Workers", icon: <Users size={16} /> },
+    { key: "clients", label: "Clients", icon: <Building2 size={16} /> },
     { key: "broadcast", label: "Broadcast Engine", icon: <Radio size={16} />, badge: unread },
   ];
 
@@ -304,6 +307,7 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
 
       {tab === "rota" && <BoardGrid lastEvent={lastEvent} />}
       {tab === "workers" && <WorkersManager />}
+      {tab === "clients" && <ClientsManager />}
       {tab === "broadcast" && (
         <BroadcastEngine
           messages={messages}

@@ -162,6 +162,9 @@ export interface ClientLite {
   companyName: string;
   address: string;
   pool: ClientPool;
+  // Present from GET /api/admin/clients (Phase 4); omitted by lighter callers.
+  phone?: string | null;
+  workerCount?: number;
 }
 
 export interface BoardCell {
