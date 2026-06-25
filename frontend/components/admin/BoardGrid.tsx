@@ -277,6 +277,13 @@ export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }
   } | null>(null);
   const [dragOver, setDragOver] = useState<string | null>(null);
 
+  // Device-independent grid height: instead of a fixed vh / pixel offset, we
+  // measure where the scroll area starts and stretch it to the bottom of the
+  // live (visual) viewport. Works on any screen — desktop monitors, laptops,
+  // and phones (where the visual viewport shrinks as browser chrome appears).
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [scrollMaxH, setScrollMaxH] = useState<number | null>(null);
+
   function shiftWeek(weeks: number) {
     setWeekStart((cur) => {
       const next = addDays(cur, weeks * 7);
@@ -532,6 +539,34 @@ export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }
     if (!visibleDays.length) return;
     setTargetDate((cur) => (cur && visibleDays.includes(cur) ? cur : visibleDays[0]));
   }, [visibleDays]);
+
+  // Auto-fit the scroll area to the viewport (no hardcoded offsets). Measures
+  // the container's top against the live viewport height and stretches it to the
+  // bottom, leaving a small gap. Re-runs on resize / orientation / visual-
+  // viewport changes (mobile chrome) and whenever the chrome above it changes
+  // height (sub-toolbars, the paste pill, the clear-filters button).
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const recompute = () => {
+      const top = el.getBoundingClientRect().top;
+      const viewportH = window.visualViewport?.height ?? window.innerHeight;
+      const next = Math.floor(viewportH - top - 16); // 16px breathing room
+      setScrollMaxH(next > 200 ? next : 200);
+    };
+    recompute();
+    window.addEventListener("resize", recompute);
+    window.addEventListener("orientationchange", recompute);
+    const vv = window.visualViewport;
+    vv?.addEventListener("resize", recompute);
+    vv?.addEventListener("scroll", recompute);
+    return () => {
+      window.removeEventListener("resize", recompute);
+      window.removeEventListener("orientationchange", recompute);
+      vv?.removeEventListener("resize", recompute);
+      vv?.removeEventListener("scroll", recompute);
+    };
+  }, [board, loading, selectMode, bulkMode, pasteMode, clipboard, hasColumnControls, footerFilter]);
 
   async function applyCell(
     workerId: string,
@@ -1172,14 +1207,16 @@ export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }
       ) : (
         <div className="overflow-hidden rounded-2xl border border-slate-200/70 bg-white shadow-sm">
           <div
+            ref={scrollRef}
             className={`scrollbar-thin overflow-auto ${
               selectMode || bulkMode ? "select-none" : ""
             }`}
-            // Bound the scroll area to the viewport (minus the page chrome) so
-            // the sticky date header (top) AND the sticky Day Summary footer
-            // (bottom) stay visible at all times — only the worker rows scroll
-            // between them. minHeight guards very short screens.
-            style={{ maxHeight: "calc(100vh - 210px)", minHeight: "300px" }}
+            // Measured, device-independent height: fills from the container's top
+            // to the bottom of the live viewport, so the sticky date header (top)
+            // and sticky Day Summary footer (bottom) stay visible on any screen —
+            // only the worker rows scroll between them. The dvh fallback applies
+            // before the first measurement (and if JS is mid-hydration).
+            style={{ maxHeight: scrollMaxH ? `${scrollMaxH}px` : "calc(100dvh - 210px)" }}
           >
             <table className="border-separate" style={{ borderSpacing: 0 }}>
               <colgroup>
