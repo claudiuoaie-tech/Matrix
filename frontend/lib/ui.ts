@@ -11,10 +11,13 @@ export const SLOT_LABELS: Record<ShiftSlot, string> = {
   NIGHT: "Night",
 };
 
+// Neutral fallback labels for a worker pool. The real client name is resolved
+// from the clients list wherever a pool is shown (Workers tab, worker form,
+// etc.); these only appear if no client is mapped to that pool yet.
 export const POOL_LABELS: Record<string, string> = {
-  POOL_A: "Client A",
-  POOL_B: "Client B",
-  POOL_C: "Client C",
+  POOL_A: "Pool A",
+  POOL_B: "Pool B",
+  POOL_C: "Pool C",
 };
 
 /** Tailwind classes for an allocation-state badge. */

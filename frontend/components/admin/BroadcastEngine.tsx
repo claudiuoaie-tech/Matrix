@@ -28,7 +28,7 @@ import type {
   MessageChannel,
   RecipientCandidate,
 } from "@/lib/types";
-import { POOL_LABELS, SLOT_LABELS, formatDate } from "@/lib/ui";
+import { SLOT_LABELS, formatDate } from "@/lib/ui";
 import { STATUS_STYLES, cellText } from "@/lib/boardUi";
 
 interface ShiftOption {
@@ -567,7 +567,7 @@ function BroadcastComposer() {
                         <Building2 size={15} className="text-muted" />
                         <span className="flex-1 text-sm font-semibold">{g.name}</span>
                         <span className="text-[11px] text-muted">
-                          {g.pool ? POOL_LABELS[g.pool] : "—"} · {g.workers.length}
+                          {g.workers.length} worker{g.workers.length === 1 ? "" : "s"}
                         </span>
                         <button
                           onClick={() => toggleCollapse(g.key)}
