@@ -99,11 +99,17 @@ webhooksRouter.post(
   validateTwilioSignature,
   async (req: Request, res: Response): Promise<void> => {
     try {
-      const { channel, number: from } = parseSender(String(req.body?.From ?? ""));
-      const body = String(req.body?.Body ?? "").trim();
+      // Trace exactly which keys Twilio sends (body for POST, query for GET).
+      console.log("Twilio Webhook Payload:", req.body);
+
+      const { channel, number: from } = parseSender(
+        String(req.body?.From ?? req.query?.From ?? "")
+      );
+      const body = String(req.body?.Body ?? req.query?.Body ?? "").trim();
       // First media attachment, if any (MMS / WhatsApp photo). Twilio sends
-      // MediaUrl0..N; we capture the first.
-      const mediaUrl = String(req.body?.MediaUrl0 ?? "").trim() || null;
+      // MediaUrl0..N; we capture the first, reading body (POST) or query (GET).
+      const mediaUrl =
+        String(req.body?.MediaUrl0 ?? req.query?.MediaUrl0 ?? "").trim() || null;
 
       if (!from) {
         replyEmpty(res);

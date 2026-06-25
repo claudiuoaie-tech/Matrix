@@ -306,6 +306,15 @@ export const admin = {
       admin: true,
       body: { phoneNumber, messageBody, channelType },
     }),
+  // Proxied URL for an inbound media attachment. Twilio media is private, so we
+  // stream it via the backend; the admin key rides as a query param so it works
+  // from a plain <img src> / link.
+  messageMediaUrl: (id: string) => {
+    const key = getAdminKey();
+    return `${API_URL}/api/admin/messages/${id}/media${
+      key ? `?key=${encodeURIComponent(key)}` : ""
+    }`;
+  },
 
   // EventSource cannot set headers, so the admin key rides as a query param.
   eventsUrl: () => {

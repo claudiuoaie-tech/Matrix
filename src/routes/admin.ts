@@ -995,6 +995,52 @@ adminRouter.get("/messages", async (req: Request, res: Response): Promise<void> 
   });
 });
 
+/**
+ * GET /api/admin/messages/:id/media — proxy an inbound media attachment.
+ *
+ * Twilio MMS / WhatsApp media URLs are private (they require the account's
+ * SID + Auth Token), so they cannot be embedded directly in an <img>. We fetch
+ * the stored mediaUrl server-side with Basic Auth and stream the bytes back.
+ * Auth is via the admin key (header or ?key=), so it works from a plain <img>.
+ */
+adminRouter.get(
+  "/messages/:id/media",
+  async (req: Request, res: Response): Promise<void> => {
+    const msg = await prisma.incomingMessage.findUnique({
+      where: { id: req.params.id },
+      select: { mediaUrl: true },
+    });
+    if (!msg?.mediaUrl) {
+      res.status(404).json({ error: "No media for this message" });
+      return;
+    }
+
+    const sid = process.env.TWILIO_ACCOUNT_SID;
+    const token = process.env.TWILIO_AUTH_TOKEN;
+    const headers: Record<string, string> = {};
+    // Authenticate the upstream fetch for Twilio-hosted media. (On the cross-
+    // origin redirect to Twilio's CDN, fetch drops the auth header automatically.)
+    if (sid && token && /(?:^|\.)twilio\.com\//.test(msg.mediaUrl)) {
+      headers.Authorization = "Basic " + Buffer.from(`${sid}:${token}`).toString("base64");
+    }
+
+    try {
+      const upstream = await fetch(msg.mediaUrl, { headers });
+      if (!upstream.ok) {
+        res.status(502).json({ error: `Upstream media fetch failed (${upstream.status})` });
+        return;
+      }
+      const buf = Buffer.from(await upstream.arrayBuffer());
+      res.setHeader("Content-Type", upstream.headers.get("content-type") ?? "application/octet-stream");
+      res.setHeader("Cache-Control", "private, max-age=3600");
+      res.send(buf);
+    } catch (err) {
+      console.error("[media proxy] fetch failed:", err);
+      res.status(502).json({ error: "Could not load media" });
+    }
+  }
+);
+
 /** POST /api/admin/messages/read-all — mark every inbound message as read. */
 adminRouter.post(
   "/messages/read-all",

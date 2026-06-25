@@ -1138,15 +1138,18 @@ function MessageCard({
             </span>
           </div>
           {known && <p className="font-mono text-[11px] text-muted">{m.fromNumber}</p>}
-          {m.messageBody && (
+          {m.messageBody?.trim() ? (
             <p className="mt-1 whitespace-pre-wrap break-words text-sm text-foreground">
               {m.messageBody}
             </p>
-          )}
-          {/* Inbound media (MMS / WhatsApp photo) — thumbnail, click to open full size. */}
+          ) : m.mediaUrl ? (
+            <p className="mt-1 text-xs italic text-muted">Photo</p>
+          ) : null}
+          {/* Inbound media (MMS / WhatsApp photo) — served via the auth proxy so
+              Twilio's private media loads; click opens it full size in a new tab. */}
           {m.mediaUrl && (
             <a
-              href={m.mediaUrl}
+              href={admin.messageMediaUrl(m.id)}
               target="_blank"
               rel="noreferrer"
               className="mt-1.5 inline-block"
@@ -1154,7 +1157,7 @@ function MessageCard({
             >
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img
-                src={m.mediaUrl}
+                src={admin.messageMediaUrl(m.id)}
                 alt="Attached media"
                 loading="lazy"
                 className="max-h-44 max-w-[12rem] rounded-lg border border-border object-cover transition hover:opacity-90"
