@@ -1175,7 +1175,11 @@ export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }
             className={`scrollbar-thin overflow-auto ${
               selectMode || bulkMode ? "select-none" : ""
             }`}
-            style={{ maxHeight: "68vh" }}
+            // Bound the scroll area to the viewport (minus the page chrome and
+            // legend) so the sticky date header (top) AND the sticky Day Summary
+            // footer (bottom) stay visible at all times — only the worker rows
+            // scroll between them. minHeight guards very short screens.
+            style={{ maxHeight: "calc(100vh - 270px)", minHeight: "300px" }}
           >
             <table className="border-separate" style={{ borderSpacing: 0 }}>
               <colgroup>
