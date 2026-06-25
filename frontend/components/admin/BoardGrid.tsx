@@ -387,6 +387,29 @@ export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }
     return () => window.removeEventListener("mouseup", up);
   }, []);
 
+  // Keyboard: Delete / Backspace clears the focused cell (the one whose editor
+  // popover is open), firing the same background clear-cell request. Ignored
+  // while typing in a field or in Quick-Match / Bulk selection modes.
+  useEffect(() => {
+    if (!editor || selectMode || bulkMode) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== "Delete" && e.key !== "Backspace") return;
+      const t = e.target as HTMLElement | null;
+      const tag = t?.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || t?.isContentEditable) {
+        return;
+      }
+      e.preventDefault();
+      const { workerId, date } = editor!;
+      void admin.clearCell(workerId, date).then(() => {
+        setEditor(null);
+        loadBoard();
+      });
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [editor, selectMode, bulkMode, loadBoard]);
+
   const visibleDays = useMemo(() => {
     if (!board) return [];
     return view === "week" ? board.days.slice(0, 7) : board.days;
@@ -1374,7 +1397,7 @@ export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }
                         zIndex: 20,
                         width: NAME_W,
                         maxWidth: NAME_W,
-                        padding: "8px 14px",
+                        padding: "7px 14px",
                         fontSize: 13,
                         borderRight: "1px solid #e2e8f0",
                         borderBottom: "1px solid #f1f5f9",
@@ -1457,7 +1480,8 @@ export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }
                                 : "cursor-pointer hover:bg-indigo-50/50"
                             }`}
                             style={{
-                              height: 40,
+                              // Row height tightened 10% (40 -> 36) to fit more rows.
+                              height: 36,
                               background: isDragOver
                                 ? "#e0e7ff"
                                 : bulkChecked
@@ -2122,7 +2146,7 @@ function StatusBadge({ cell }: { cell: BoardCell }) {
   const confirmed = cell.status === "SCHEDULED" && cell.confirmed;
   return (
     <span
-      className="relative flex h-[24px] flex-1 items-center justify-center rounded-md border px-1.5 text-[11px] font-semibold leading-none tracking-tight shadow-sm"
+      className="relative flex h-[24px] w-full min-w-0 flex-1 items-center justify-center overflow-hidden rounded-md border px-1.5 text-[11px] font-semibold leading-none tracking-tight shadow-sm"
       style={{
         background: style.bg,
         color: style.fg,
@@ -2132,7 +2156,9 @@ function StatusBadge({ cell }: { cell: BoardCell }) {
       }}
       title={confirmed ? `${text} · Confirmed by worker` : text}
     >
-      {text}
+      {/* Truncate so every cartridge keeps identical dimensions regardless of the
+          text length ("Holiday" / "Day 09:00" / "Unavailable" all look the same). */}
+      <span className="block min-w-0 truncate">{text}</span>
       {/* Style B — tiny double-check badge in the top-right corner. */}
       {confirmed && (
         <span

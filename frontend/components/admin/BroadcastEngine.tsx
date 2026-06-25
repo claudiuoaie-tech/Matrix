@@ -16,7 +16,6 @@ import {
   Inbox,
   MessageSquare,
   MessageCircle,
-  Reply,
   Trash2,
   X,
   Plus,
@@ -702,64 +701,96 @@ function InboxPane({
   onBulkDelete: (ids: string[]) => Promise<void>;
   onSendDirect: (phoneNumber: string, body: string, channel: MessageChannel) => Promise<void>;
 }) {
-  // Client-side view filter (Feature 3). "unread" shows only inbound un-read.
+  // All / Unread filter (operates on threads). "unread" = threads with unread.
   const [filter, setFilter] = useState<"all" | "unread">("all");
   const [clearing, setClearing] = useState(false);
-  // Multi-select deletion (Phase 2, Feature 1).
+  // Multi-select deletion now selects whole conversations (by phone).
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const masterRef = useRef<HTMLInputElement>(null);
-  // Ad-hoc "New message" composer modal (Phase 2, Feature 2).
+  // Ad-hoc "New message" composer modal.
   const [composeOpen, setComposeOpen] = useState(false);
+  // Which conversation is open (by phone); null = thread list.
+  const [openPhone, setOpenPhone] = useState<string | null>(null);
 
-  const visible = filter === "unread" ? messages.filter((m) => !m.isRead) : messages;
   const readCount = messages.filter((m) => m.isRead).length;
 
-  // Drop selections for messages that no longer exist (after deletes / reloads).
+  // Group every message into a conversation thread keyed by phone number.
+  const threads = useMemo<Thread[]>(() => {
+    const map = new Map<string, IncomingMessage[]>();
+    for (const m of messages) {
+      const arr = map.get(m.fromNumber) ?? [];
+      arr.push(m);
+      map.set(m.fromNumber, arr);
+    }
+    const list: Thread[] = [];
+    for (const [phone, msgs] of map) {
+      // Sort ascending (oldest→newest) for the chat view.
+      const asc = [...msgs].sort((a, b) => a.receivedAt.localeCompare(b.receivedAt));
+      const latest = asc[asc.length - 1];
+      list.push({
+        phone,
+        workerName: asc.find((m) => m.workerName)?.workerName ?? null,
+        messages: asc,
+        latest,
+        unreadCount: asc.filter((m) => !m.isRead).length,
+        channel: latest.channel,
+      });
+    }
+    // Most-recently-active conversation first.
+    list.sort((a, b) => b.latest.receivedAt.localeCompare(a.latest.receivedAt));
+    return list;
+  }, [messages]);
+
+  const visibleThreads =
+    filter === "unread" ? threads.filter((t) => t.unreadCount > 0) : threads;
+
+  // Drop selections for conversations that no longer exist.
   useEffect(() => {
     setSelected((prev) => {
-      const live = new Set(messages.map((m) => m.id));
+      const live = new Set(threads.map((t) => t.phone));
       let changed = false;
       const next = new Set<string>();
-      for (const id of prev) {
-        if (live.has(id)) next.add(id);
+      for (const p of prev) {
+        if (live.has(p)) next.add(p);
         else changed = true;
       }
       return changed ? next : prev;
     });
-  }, [messages]);
+  }, [threads]);
 
-  const visibleIds = visible.map((m) => m.id);
+  const visiblePhones = visibleThreads.map((t) => t.phone);
   const allVisibleSelected =
-    visibleIds.length > 0 && visibleIds.every((id) => selected.has(id));
+    visiblePhones.length > 0 && visiblePhones.every((p) => selected.has(p));
   const someVisibleSelected =
-    !allVisibleSelected && visibleIds.some((id) => selected.has(id));
+    !allVisibleSelected && visiblePhones.some((p) => selected.has(p));
 
-  // Reflect the "some but not all" state on the master checkbox.
   useEffect(() => {
     if (masterRef.current) masterRef.current.indeterminate = someVisibleSelected;
   }, [someVisibleSelected]);
 
-  function toggleSelect(id: string) {
+  function toggleThread(phone: string) {
     setSelected((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (next.has(phone)) next.delete(phone);
+      else next.add(phone);
       return next;
     });
   }
-
   function toggleSelectAllVisible() {
     setSelected((prev) => {
       const next = new Set(prev);
-      if (allVisibleSelected) visibleIds.forEach((id) => next.delete(id));
-      else visibleIds.forEach((id) => next.add(id));
+      if (allVisibleSelected) visiblePhones.forEach((p) => next.delete(p));
+      else visiblePhones.forEach((p) => next.add(p));
       return next;
     });
   }
 
   async function deleteSelected() {
-    const ids = [...selected];
+    // Flatten every message id across the selected conversations.
+    const ids = threads
+      .filter((t) => selected.has(t.phone))
+      .flatMap((t) => t.messages.map((m) => m.id));
     if (ids.length === 0) return;
     setBulkDeleting(true);
     try {
@@ -782,25 +813,40 @@ function InboxPane({
     }
   }
 
+  const openThread = openPhone ? threads.find((t) => t.phone === openPhone) ?? null : null;
+
+  // ---- Conversation view -----------------------------------------------------
+  if (openThread) {
+    return (
+      <section className="rounded-2xl border border-border bg-card">
+        <ConversationView
+          thread={openThread}
+          onBack={() => setOpenPhone(null)}
+          onReply={onReply}
+          onDelete={onDelete}
+        />
+      </section>
+    );
+  }
+
+  // ---- Thread list -----------------------------------------------------------
   return (
     <section className="rounded-2xl border border-border bg-card">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
         <div>
           <h3 className="font-semibold">Live Inbox</h3>
           <p className="text-xs text-muted">
-            {messages.length} message{messages.length === 1 ? "" : "s"}
+            {threads.length} conversation{threads.length === 1 ? "" : "s"}
             {unread > 0 ? ` · ${unread} unread` : ""}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
-          {/* Phase 2, Feature 2 — ad-hoc outbound to any number */}
           <button
             onClick={() => setComposeOpen(true)}
             className="inline-flex items-center gap-1.5 rounded-lg bg-brand px-3 py-1.5 text-xs font-semibold text-white hover:opacity-90"
           >
             <Plus size={14} /> New message
           </button>
-          {/* Feature 3 — All / Unread filter toggle */}
           <div className="inline-flex rounded-lg border border-border p-0.5">
             <FilterTab active={filter === "all"} onClick={() => setFilter("all")} label="All" />
             <FilterTab
@@ -817,7 +863,6 @@ function InboxPane({
             {marking ? <Loader2 size={14} className="animate-spin" /> : <CheckCheck size={14} />}
             Mark all read
           </button>
-          {/* Feature 2 (prior phase) — bulk clear read history */}
           <button
             onClick={clearRead}
             disabled={clearing || readCount === 0}
@@ -830,8 +875,8 @@ function InboxPane({
         </div>
       </div>
 
-      {/* Phase 2, Feature 1 — select-all + delete-selected bar */}
-      {!loading && visible.length > 0 && (
+      {/* Select-all + delete-selected (whole conversations) */}
+      {!loading && visibleThreads.length > 0 && (
         <div className="flex items-center justify-between gap-2 border-b border-border bg-slate-50/60 px-4 py-2">
           <label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-muted">
             <input
@@ -849,11 +894,7 @@ function InboxPane({
               disabled={bulkDeleting}
               className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-700 disabled:opacity-50"
             >
-              {bulkDeleting ? (
-                <Loader2 size={14} className="animate-spin" />
-              ) : (
-                <Trash2 size={14} />
-              )}
+              {bulkDeleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
               Delete selected ({selected.size})
             </button>
           )}
@@ -865,23 +906,22 @@ function InboxPane({
           <div className="grid place-items-center py-12">
             <Loader2 className="animate-spin text-muted" />
           </div>
-        ) : visible.length === 0 ? (
+        ) : visibleThreads.length === 0 ? (
           <div className="px-4 py-12 text-center text-sm text-muted">
             <Inbox size={28} className="mx-auto mb-2 text-slate-300" />
             {filter === "unread"
-              ? "No unread messages."
+              ? "No unread conversations."
               : "No messages yet. Inbound texts appear here in real time."}
           </div>
         ) : (
           <ul className="divide-y divide-border">
-            {visible.map((m) => (
-              <MessageCard
-                key={m.id}
-                m={m}
-                selected={selected.has(m.id)}
-                onToggleSelect={toggleSelect}
-                onReply={onReply}
-                onDelete={onDelete}
+            {visibleThreads.map((t) => (
+              <ThreadRow
+                key={t.phone}
+                thread={t}
+                selected={selected.has(t.phone)}
+                onToggle={toggleThread}
+                onOpen={setOpenPhone}
               />
             ))}
           </ul>
@@ -893,6 +933,16 @@ function InboxPane({
       )}
     </section>
   );
+}
+
+/** A conversation thread: all messages with one phone number. */
+interface Thread {
+  phone: string;
+  workerName: string | null;
+  messages: IncomingMessage[]; // chronological ascending
+  latest: IncomingMessage;
+  unreadCount: number;
+  channel: MessageChannel;
 }
 
 /**
@@ -1042,44 +1092,176 @@ function FilterTab({
   );
 }
 
-function MessageCard({
-  m,
+/** One conversation row in the thread list: latest snippet + unread badge. */
+function ThreadRow({
+  thread,
   selected,
-  onToggleSelect,
+  onToggle,
+  onOpen,
+}: {
+  thread: Thread;
+  selected: boolean;
+  onToggle: (phone: string) => void;
+  onOpen: (phone: string) => void;
+}) {
+  const known = !!thread.workerName;
+  const title = known ? thread.workerName! : thread.phone;
+  const last = thread.latest;
+  const snippet =
+    last.messageBody?.trim() || (last.mediaUrl ? "📷 Photo" : "");
+  const initial = title.trim().charAt(0).toUpperCase() || "#";
+
+  return (
+    <li
+      className={`flex items-center gap-3 px-4 py-3 transition-colors ${
+        thread.unreadCount > 0 ? "bg-indigo-50/40" : "hover:bg-slate-50"
+      }`}
+    >
+      <input
+        type="checkbox"
+        checked={selected}
+        onChange={() => onToggle(thread.phone)}
+        aria-label={`Select conversation with ${title}`}
+        className="h-4 w-4 shrink-0 accent-[var(--brand)]"
+      />
+      <button
+        onClick={() => onOpen(thread.phone)}
+        className="flex min-w-0 flex-1 items-center gap-3 text-left"
+      >
+        <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-slate-100 text-sm font-semibold text-slate-500">
+          {initial}
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="flex items-center gap-2">
+            <span
+              className={`truncate text-sm ${
+                known ? "font-bold text-foreground" : "font-mono text-foreground"
+              }`}
+            >
+              {title}
+            </span>
+            <ChannelBadge channel={thread.channel} />
+            <span className="ml-auto shrink-0 text-[11px] text-muted">
+              {relativeTime(last.receivedAt)}
+            </span>
+          </span>
+          <span className="mt-0.5 flex items-center gap-2">
+            <span className="min-w-0 flex-1 truncate text-xs text-muted">
+              {last.direction === "OUTBOUND" ? "You: " : ""}
+              {snippet}
+            </span>
+            {thread.unreadCount > 0 && (
+              <span className="grid min-w-[18px] shrink-0 place-items-center rounded-full bg-rose-500 px-1 text-[10px] font-bold text-white">
+                {thread.unreadCount}
+              </span>
+            )}
+          </span>
+        </span>
+      </button>
+    </li>
+  );
+}
+
+/** Expanded chat dialog: chronological bubbles + a reply composer. */
+function ConversationView({
+  thread,
+  onBack,
   onReply,
   onDelete,
 }: {
-  m: IncomingMessage;
-  selected: boolean;
-  onToggleSelect: (id: string) => void;
+  thread: Thread;
+  onBack: () => void;
   onReply: (recipientPhone: string, body: string, channel: MessageChannel) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
 }) {
-  const known = !!m.workerName;
-  const outbound = m.direction === "OUTBOUND";
-
-  const [replyOpen, setReplyOpen] = useState(false);
-  const [replyText, setReplyText] = useState("");
+  const known = !!thread.workerName;
+  const [text, setText] = useState("");
   const [sending, setSending] = useState(false);
-  const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function sendReply() {
-    const body = replyText.trim();
+  async function send() {
+    const body = text.trim();
     if (!body) return;
     setSending(true);
     setError(null);
     try {
-      // Reply on the same channel the message belongs to, to the contact number.
-      await onReply(m.fromNumber, body, m.channel);
-      setReplyText("");
-      setReplyOpen(false);
+      await onReply(thread.phone, body, thread.channel);
+      setText("");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to send reply");
+      setError(err instanceof Error ? err.message : "Failed to send");
     } finally {
       setSending(false);
     }
   }
+
+  return (
+    <div className="flex flex-col" style={{ height: "33rem" }}>
+      {/* Header */}
+      <div className="flex items-center gap-3 border-b border-border px-4 py-3">
+        <button
+          onClick={onBack}
+          title="Back to conversations"
+          className="grid h-8 w-8 place-items-center rounded-lg text-muted hover:bg-slate-100 hover:text-foreground"
+        >
+          <ArrowLeft size={18} />
+        </button>
+        <div className="min-w-0">
+          <p className="truncate font-semibold">{known ? thread.workerName : thread.phone}</p>
+          {known && <p className="font-mono text-[11px] text-muted">{thread.phone}</p>}
+        </div>
+        <span className="ml-auto">
+          <ChannelBadge channel={thread.channel} />
+        </span>
+      </div>
+
+      {/* Messages */}
+      <div className="flex-1 space-y-2 overflow-y-auto thin-scroll bg-slate-50/50 p-4">
+        {thread.messages.map((m) => (
+          <ChatBubble key={m.id} m={m} onDelete={onDelete} />
+        ))}
+      </div>
+
+      {/* Reply composer */}
+      <div className="border-t border-border p-3">
+        {error && <p className="mb-1 text-xs text-rose-600">{error}</p>}
+        <div className="flex items-end gap-2">
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            rows={1}
+            placeholder={`Reply via ${thread.channel === "WHATSAPP" ? "WhatsApp" : "SMS"}…`}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void send();
+              }
+            }}
+            className="max-h-28 min-h-[40px] flex-1 resize-none rounded-xl border border-border bg-white px-3 py-2 text-sm outline-none focus:border-brand"
+          />
+          <button
+            onClick={send}
+            disabled={sending || !text.trim()}
+            className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-brand text-white disabled:opacity-50"
+            title="Send"
+          >
+            {sending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** A single chat bubble — outbound right (brand), inbound left (white). */
+function ChatBubble({
+  m,
+  onDelete,
+}: {
+  m: IncomingMessage;
+  onDelete: (id: string) => Promise<void>;
+}) {
+  const outbound = m.direction === "OUTBOUND";
+  const [deleting, setDeleting] = useState(false);
 
   async function remove() {
     if (deleting) return;
@@ -1087,138 +1269,56 @@ function MessageCard({
     try {
       await onDelete(m.id);
     } catch {
-      setDeleting(false); // keep the row if the delete failed
+      setDeleting(false);
     }
   }
 
   return (
-    <li
-      className={`group px-4 py-3 transition-colors ${
-        selected
-          ? "bg-indigo-50"
-          : outbound
-          ? "bg-emerald-50/40"
-          : m.isRead
-          ? ""
-          : "bg-indigo-50/40"
-      }`}
-    >
-      <div className="flex gap-3">
-        {/* Selection checkbox (Phase 2, Feature 1). */}
-        <input
-          type="checkbox"
-          checked={selected}
-          onChange={() => onToggleSelect(m.id)}
-          aria-label="Select message"
-          className="mt-1 h-4 w-4 shrink-0 accent-[var(--brand)]"
-        />
-        {/* Fixed-width marker column keeps rows aligned. */}
-        <span className="mt-1.5 flex h-2 w-2 shrink-0">
-          {!m.isRead && !outbound && (
-            <span className="h-2 w-2 rounded-full bg-brand" title="Unread" />
-          )}
+    <div className={`group flex ${outbound ? "justify-end" : "justify-start"}`}>
+      <div
+        className={`relative max-w-[80%] rounded-2xl px-3 py-2 text-sm shadow-sm ${
+          outbound
+            ? "rounded-br-sm bg-brand text-white"
+            : "rounded-bl-sm border border-border bg-white text-foreground"
+        }`}
+      >
+        {m.messageBody?.trim() && (
+          <p className="whitespace-pre-wrap break-words">{m.messageBody}</p>
+        )}
+        {m.mediaUrl && (
+          <a
+            href={admin.messageMediaUrl(m.id)}
+            target="_blank"
+            rel="noreferrer"
+            className={m.messageBody?.trim() ? "mt-1.5 block" : "block"}
+            title="Open full-size image in a new tab"
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={admin.messageMediaUrl(m.id)}
+              alt="Attached media"
+              loading="lazy"
+              className="max-h-44 max-w-[12rem] rounded-lg object-cover"
+            />
+          </a>
+        )}
+        <span
+          className={`mt-1 block text-[10px] ${outbound ? "text-white/70" : "text-muted"}`}
+        >
+          {relativeTime(m.receivedAt)}
         </span>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span
-              className={`truncate text-sm ${
-                known ? "font-bold text-foreground" : "font-mono text-foreground"
-              }`}
-            >
-              {known ? m.workerName : m.fromNumber}
-            </span>
-            <ChannelBadge channel={m.channel} />
-            {outbound && (
-              <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
-                Sent
-              </span>
-            )}
-            <span className="ml-auto shrink-0 text-[11px] text-muted">
-              {relativeTime(m.receivedAt)}
-            </span>
-          </div>
-          {known && <p className="font-mono text-[11px] text-muted">{m.fromNumber}</p>}
-          {m.messageBody?.trim() ? (
-            <p className="mt-1 whitespace-pre-wrap break-words text-sm text-foreground">
-              {m.messageBody}
-            </p>
-          ) : m.mediaUrl ? (
-            <p className="mt-1 text-xs italic text-muted">Photo</p>
-          ) : null}
-          {/* Inbound media (MMS / WhatsApp photo) — served via the auth proxy so
-              Twilio's private media loads; click opens it full size in a new tab. */}
-          {m.mediaUrl && (
-            <a
-              href={admin.messageMediaUrl(m.id)}
-              target="_blank"
-              rel="noreferrer"
-              className="mt-1.5 inline-block"
-              title="Open full-size image in a new tab"
-            >
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={admin.messageMediaUrl(m.id)}
-                alt="Attached media"
-                loading="lazy"
-                className="max-h-44 max-w-[12rem] rounded-lg border border-border object-cover transition hover:opacity-90"
-              />
-            </a>
-          )}
-
-          {/* Row actions — subtle, surfaced on hover/focus. */}
-          <div className="mt-1.5 flex items-center gap-3 text-muted opacity-100 sm:opacity-0 sm:transition-opacity sm:group-hover:opacity-100 sm:focus-within:opacity-100">
-            <button
-              onClick={() => setReplyOpen((o) => !o)}
-              className="inline-flex items-center gap-1 text-[11px] font-medium hover:text-brand"
-            >
-              <Reply size={13} /> Reply
-            </button>
-            <button
-              onClick={remove}
-              disabled={deleting}
-              title="Delete message"
-              className="inline-flex items-center gap-1 text-[11px] font-medium hover:text-rose-600 disabled:opacity-50"
-            >
-              {deleting ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
-            </button>
-          </div>
-
-          {/* Inline reply composer */}
-          {replyOpen && (
-            <div className="mt-2 rounded-xl border border-border bg-white p-2">
-              <textarea
-                value={replyText}
-                onChange={(e) => setReplyText(e.target.value)}
-                rows={2}
-                autoFocus
-                placeholder={`Reply via ${m.channel === "WHATSAPP" ? "WhatsApp" : "SMS"}…`}
-                className="w-full resize-none rounded-lg border border-border p-2 text-sm outline-none focus:border-brand"
-              />
-              {error && <p className="mt-1 text-xs text-rose-600">{error}</p>}
-              <div className="mt-1.5 flex items-center justify-end gap-2">
-                <button
-                  onClick={() => {
-                    setReplyOpen(false);
-                    setError(null);
-                  }}
-                  className="inline-flex items-center gap-1 rounded-lg border border-border px-2.5 py-1.5 text-xs font-medium text-muted hover:bg-slate-50"
-                >
-                  <X size={13} /> Cancel
-                </button>
-                <button
-                  onClick={sendReply}
-                  disabled={sending || !replyText.trim()}
-                  className="inline-flex items-center gap-1.5 rounded-lg bg-brand px-3 py-1.5 text-xs font-medium text-white disabled:opacity-50"
-                >
-                  {sending ? <Loader2 size={13} className="animate-spin" /> : <Send size={13} />}
-                  Send
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
+        <button
+          onClick={remove}
+          disabled={deleting}
+          title="Delete message"
+          className={`absolute -top-2 hidden h-5 w-5 place-items-center rounded-full border border-border bg-white text-rose-600 shadow group-hover:grid ${
+            outbound ? "-left-2" : "-right-2"
+          }`}
+        >
+          {deleting ? <Loader2 size={11} className="animate-spin" /> : <Trash2 size={11} />}
+        </button>
       </div>
-    </li>
+    </div>
   );
 }
 
