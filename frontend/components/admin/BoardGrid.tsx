@@ -1175,11 +1175,11 @@ export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }
             className={`scrollbar-thin overflow-auto ${
               selectMode || bulkMode ? "select-none" : ""
             }`}
-            // Bound the scroll area to the viewport (minus the page chrome and
-            // legend) so the sticky date header (top) AND the sticky Day Summary
-            // footer (bottom) stay visible at all times — only the worker rows
-            // scroll between them. minHeight guards very short screens.
-            style={{ maxHeight: "calc(100vh - 270px)", minHeight: "300px" }}
+            // Bound the scroll area to the viewport (minus the page chrome) so
+            // the sticky date header (top) AND the sticky Day Summary footer
+            // (bottom) stay visible at all times — only the worker rows scroll
+            // between them. minHeight guards very short screens.
+            style={{ maxHeight: "calc(100vh - 210px)", minHeight: "300px" }}
           >
             <table className="border-separate" style={{ borderSpacing: 0 }}>
               <colgroup>
@@ -1575,22 +1575,6 @@ export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }
           </div>
         </div>
       )}
-
-      {/* Legend */}
-      <div className="flex flex-wrap gap-x-4 gap-y-2 rounded-2xl border border-slate-200/70 bg-white px-4 py-3 text-xs font-medium text-slate-500 shadow-sm">
-        {(Object.keys(STATUS_STYLES) as RotaStatus[]).map((s) => (
-          <span key={s} className="inline-flex items-center gap-1.5">
-            <span
-              className="inline-block h-3 w-3 rounded-md border border-black/10"
-              style={{ background: STATUS_STYLES[s].bg }}
-            />
-            {STATUS_STYLES[s].label}
-          </span>
-        ))}
-        <span className="ml-auto inline-flex items-center gap-1.5 text-slate-400">
-          <Bell size={12} /> Nudge · <Copy size={12} /> Copy
-        </span>
-      </div>
 
       {editor && !selectMode && !bulkMode && (
         <CellEditor
