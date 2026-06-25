@@ -123,6 +123,7 @@ export default function ClientsManager() {
       {(editing || creating) && (
         <ClientModal
           client={editing}
+          clients={clients}
           onClose={() => {
             setEditing(null);
             setCreating(false);
@@ -179,13 +180,21 @@ export default function ClientsManager() {
 
 function ClientModal({
   client,
+  clients,
   onClose,
   onSaved,
 }: {
   client: ClientLite | null;
+  clients: ClientLite[];
   onClose: () => void;
   onSaved: () => void;
 }) {
+  // Real client name per pool, so the dropdown reads as client names rather than
+  // generic "Pool A/B/C". Falls back to the neutral label for an empty pool.
+  const poolName: Record<string, string> = {};
+  for (const c of clients) {
+    poolName[c.pool] = poolName[c.pool] ? `${poolName[c.pool]}, ${c.companyName}` : c.companyName;
+  }
   const [companyName, setCompanyName] = useState(client?.companyName ?? "");
   const [address, setAddress] = useState(client?.address ?? "");
   const [phone, setPhone] = useState(client?.phone ?? "");
@@ -264,7 +273,7 @@ function ClientModal({
             >
               {POOLS.map((p) => (
                 <option key={p} value={p}>
-                  {POOL_LABELS[p]}
+                  {poolName[p] ?? POOL_LABELS[p]}
                 </option>
               ))}
             </select>
