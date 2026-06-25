@@ -40,14 +40,25 @@ export const twilioClient = credentialsConfigured
  * to end. A real send failure is logged but never thrown, so a single bad number
  * can't crash a request or abort a bulk broadcast.
  */
-export async function sendSms(to: string, body: string): Promise<void> {
+export async function sendSms(
+  to: string,
+  body: string,
+  mediaUrls?: string[]
+): Promise<void> {
   if (!twilioClient || !TWILIO_FROM_NUMBER) {
-    console.log(`[sms:mock] -> ${to}: ${body}`);
+    console.log(
+      `[sms:mock] -> ${to}: ${body}${mediaUrls?.length ? ` [media: ${mediaUrls.join(", ")}]` : ""}`
+    );
     return;
   }
 
   try {
-    await twilioClient.messages.create({ to, from: TWILIO_FROM_NUMBER, body });
+    await twilioClient.messages.create({
+      to,
+      from: TWILIO_FROM_NUMBER,
+      body,
+      ...(mediaUrls?.length ? { mediaUrl: mediaUrls } : {}),
+    });
   } catch (err) {
     console.error(`[sms] failed to send to ${to}:`, err);
   }
@@ -63,9 +74,15 @@ function toWhatsApp(addr: string): string {
  * sender aren't configured, and swallows send failures so one bad recipient
  * can't abort a bulk broadcast.
  */
-export async function sendWhatsApp(to: string, body: string): Promise<void> {
+export async function sendWhatsApp(
+  to: string,
+  body: string,
+  mediaUrls?: string[]
+): Promise<void> {
   if (!twilioClient || !TWILIO_WHATSAPP_FROM) {
-    console.log(`[whatsapp:mock] -> ${to}: ${body}`);
+    console.log(
+      `[whatsapp:mock] -> ${to}: ${body}${mediaUrls?.length ? ` [media: ${mediaUrls.join(", ")}]` : ""}`
+    );
     return;
   }
 
@@ -74,17 +91,21 @@ export async function sendWhatsApp(to: string, body: string): Promise<void> {
       to: toWhatsApp(to),
       from: toWhatsApp(TWILIO_WHATSAPP_FROM),
       body,
+      ...(mediaUrls?.length ? { mediaUrl: mediaUrls } : {}),
     });
   } catch (err) {
     console.error(`[whatsapp] failed to send to ${to}:`, err);
   }
 }
 
-/** Dispatch a message on the chosen channel (SMS by default). */
+/** Dispatch a message on the chosen channel (SMS by default), with optional media. */
 export async function sendMessage(
   to: string,
   body: string,
-  channel: SendChannel = "SMS"
+  channel: SendChannel = "SMS",
+  mediaUrls?: string[]
 ): Promise<void> {
-  return channel === "WHATSAPP" ? sendWhatsApp(to, body) : sendSms(to, body);
+  return channel === "WHATSAPP"
+    ? sendWhatsApp(to, body, mediaUrls)
+    : sendSms(to, body, mediaUrls);
 }

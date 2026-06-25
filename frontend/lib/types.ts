@@ -84,6 +84,13 @@ export interface InboxResponse {
   messages: IncomingMessage[];
 }
 
+/** An outbound attachment uploaded/pasted by an admin (base64 data URL). */
+export interface OutboundMedia {
+  fileName: string;
+  mimeType: string;
+  data: string;
+}
+
 export interface WorkerShift {
   id: string;
   date: string; // YYYY-MM-DD

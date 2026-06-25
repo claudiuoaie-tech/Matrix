@@ -19,6 +19,8 @@ import {
   Trash2,
   X,
   Plus,
+  Paperclip,
+  FileText,
 } from "lucide-react";
 import { admin } from "@/lib/api";
 import type {
@@ -26,6 +28,7 @@ import type {
   ClientLite,
   IncomingMessage,
   MessageChannel,
+  OutboundMedia,
   RecipientCandidate,
 } from "@/lib/types";
 import { SLOT_LABELS, formatDate } from "@/lib/ui";
@@ -60,11 +63,21 @@ export default function BroadcastEngine({
   loadingInbox: boolean;
   marking: boolean;
   onMarkAll: () => void;
-  onReply: (recipientPhone: string, body: string, channel: MessageChannel) => Promise<void>;
+  onReply: (
+    recipientPhone: string,
+    body: string,
+    channel: MessageChannel,
+    media?: OutboundMedia
+  ) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onClearRead: () => Promise<void>;
   onBulkDelete: (ids: string[]) => Promise<void>;
-  onSendDirect: (phoneNumber: string, body: string, channel: MessageChannel) => Promise<void>;
+  onSendDirect: (
+    phoneNumber: string,
+    body: string,
+    channel: MessageChannel,
+    media?: OutboundMedia
+  ) => Promise<void>;
 }) {
   // The inbox feed/unread/mark-all state is owned by the parent AdminConsole so
   // the unread badge stays live on the Broadcast Engine tab even when another
@@ -695,11 +708,21 @@ function InboxPane({
   unread: number;
   marking: boolean;
   onMarkAll: () => void;
-  onReply: (recipientPhone: string, body: string, channel: MessageChannel) => Promise<void>;
+  onReply: (
+    recipientPhone: string,
+    body: string,
+    channel: MessageChannel,
+    media?: OutboundMedia
+  ) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
   onClearRead: () => Promise<void>;
   onBulkDelete: (ids: string[]) => Promise<void>;
-  onSendDirect: (phoneNumber: string, body: string, channel: MessageChannel) => Promise<void>;
+  onSendDirect: (
+    phoneNumber: string,
+    body: string,
+    channel: MessageChannel,
+    media?: OutboundMedia
+  ) => Promise<void>;
 }) {
   // All / Unread filter (operates on threads). "unread" = threads with unread.
   const [filter, setFilter] = useState<"all" | "unread">("all");
@@ -954,19 +977,39 @@ function NewMessageModal({
   onSend,
 }: {
   onClose: () => void;
-  onSend: (phoneNumber: string, body: string, channel: MessageChannel) => Promise<void>;
+  onSend: (
+    phoneNumber: string,
+    body: string,
+    channel: MessageChannel,
+    media?: OutboundMedia
+  ) => Promise<void>;
 }) {
   const [phone, setPhone] = useState("");
   const [channel, setChannel] = useState<MessageChannel>("SMS");
   const [body, setBody] = useState("");
+  const [media, setMedia] = useState<OutboundMedia | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  async function attachFromFile(file: File | null | undefined) {
+    if (!file) return;
+    try {
+      setMedia(await fileToMedia(file));
+    } catch {
+      setError("Could not read that file.");
+    }
+  }
 
   async function send() {
     const p = phone.trim();
     const b = body.trim();
-    if (!p || !b) {
-      setError("Enter a phone number and a message.");
+    if (!p) {
+      setError("Enter a phone number.");
+      return;
+    }
+    if (!b && !media) {
+      setError("Enter a message or attach a file.");
       return;
     }
     // Light client-side guard; the number should ideally be E.164 (e.g. +447…).
@@ -977,7 +1020,7 @@ function NewMessageModal({
     setSending(true);
     setError(null);
     try {
-      await onSend(p, b, channel);
+      await onSend(p, b, channel, media ?? undefined);
       onClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to send message.");
@@ -1040,9 +1083,17 @@ function NewMessageModal({
         </div>
 
         <label className="mb-1 block text-xs font-medium text-muted">Message</label>
+        {media && <AttachmentPreview media={media} onRemove={() => setMedia(null)} />}
         <textarea
           value={body}
           onChange={(e) => setBody(e.target.value)}
+          onPaste={(e) => {
+            const f = fileFromPaste(e);
+            if (f) {
+              e.preventDefault();
+              void attachFromFile(f);
+            }
+          }}
           rows={4}
           placeholder="Type your message…"
           className="w-full resize-none rounded-lg border border-border bg-white p-3 text-sm outline-none focus:border-brand"
@@ -1050,21 +1101,41 @@ function NewMessageModal({
 
         {error && <p className="mt-2 text-xs text-rose-600">{error}</p>}
 
-        <div className="mt-4 flex items-center justify-end gap-2">
+        <input
+          ref={fileRef}
+          type="file"
+          accept={MEDIA_ACCEPT}
+          className="hidden"
+          onChange={(e) => {
+            void attachFromFile(e.target.files?.[0]);
+            e.target.value = "";
+          }}
+        />
+        <div className="mt-4 flex items-center justify-between gap-2">
           <button
-            onClick={onClose}
-            className="inline-flex items-center gap-1 rounded-lg border border-border px-3 py-2 text-sm font-medium text-muted hover:bg-slate-50"
+            type="button"
+            onClick={() => fileRef.current?.click()}
+            title="Attach a photo or document"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-2 text-sm font-medium text-muted hover:bg-slate-50"
           >
-            Cancel
+            <Paperclip size={16} /> Attach
           </button>
-          <button
-            onClick={send}
-            disabled={sending || !phone.trim() || !body.trim()}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-brand px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
-          >
-            {sending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
-            Send
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onClose}
+              className="inline-flex items-center gap-1 rounded-lg border border-border px-3 py-2 text-sm font-medium text-muted hover:bg-slate-50"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={send}
+              disabled={sending || !phone.trim() || (!body.trim() && !media)}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-brand px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+            >
+              {sending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
+              Send
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -1162,6 +1233,58 @@ function ThreadRow({
   );
 }
 
+// ---- Outbound attachment helpers ------------------------------------------
+
+const MEDIA_ACCEPT = "image/jpeg,image/png,image/gif,image/webp,application/pdf";
+
+/** Read a File into an OutboundMedia payload (base64 data URL). */
+function fileToMedia(file: File): Promise<OutboundMedia> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () =>
+      resolve({ fileName: file.name, mimeType: file.type, data: String(r.result) });
+    r.onerror = () => reject(new Error("Could not read file"));
+    r.readAsDataURL(file);
+  });
+}
+
+/** The first file on a paste event (Ctrl/Cmd+V), if any. */
+function fileFromPaste(e: React.ClipboardEvent): File | null {
+  const files = e.clipboardData?.files;
+  return files && files.length > 0 ? files[0] : null;
+}
+
+/** A staged-attachment thumbnail with a remove button (shown above the input). */
+function AttachmentPreview({
+  media,
+  onRemove,
+}: {
+  media: OutboundMedia;
+  onRemove: () => void;
+}) {
+  const isImage = media.mimeType.startsWith("image/");
+  return (
+    <div className="mb-2 inline-flex items-center gap-2 rounded-lg border border-border bg-slate-50 p-1.5">
+      {isImage ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img src={media.data} alt={media.fileName} className="h-12 w-12 rounded object-cover" />
+      ) : (
+        <span className="grid h-12 w-12 place-items-center rounded bg-white text-slate-400">
+          <FileText size={20} />
+        </span>
+      )}
+      <span className="max-w-[10rem] truncate text-xs text-muted">{media.fileName}</span>
+      <button
+        onClick={onRemove}
+        title="Remove attachment"
+        className="grid h-5 w-5 place-items-center rounded-full bg-slate-200 text-slate-600 hover:bg-rose-100 hover:text-rose-600"
+      >
+        <X size={12} />
+      </button>
+    </div>
+  );
+}
+
 /** Expanded chat dialog: chronological bubbles + a reply composer. */
 function ConversationView({
   thread,
@@ -1171,22 +1294,39 @@ function ConversationView({
 }: {
   thread: Thread;
   onBack: () => void;
-  onReply: (recipientPhone: string, body: string, channel: MessageChannel) => Promise<void>;
+  onReply: (
+    recipientPhone: string,
+    body: string,
+    channel: MessageChannel,
+    media?: OutboundMedia
+  ) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
 }) {
   const known = !!thread.workerName;
   const [text, setText] = useState("");
+  const [media, setMedia] = useState<OutboundMedia | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  async function attachFromFile(file: File | null | undefined) {
+    if (!file) return;
+    try {
+      setMedia(await fileToMedia(file));
+    } catch {
+      setError("Could not read that file.");
+    }
+  }
 
   async function send() {
     const body = text.trim();
-    if (!body) return;
+    if (!body && !media) return;
     setSending(true);
     setError(null);
     try {
-      await onReply(thread.phone, body, thread.channel);
+      await onReply(thread.phone, body, thread.channel, media ?? undefined);
       setText("");
+      setMedia(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to send");
     } finally {
@@ -1224,7 +1364,25 @@ function ConversationView({
       {/* Reply composer */}
       <div className="border-t border-border p-3">
         {error && <p className="mb-1 text-xs text-rose-600">{error}</p>}
+        {media && <AttachmentPreview media={media} onRemove={() => setMedia(null)} />}
         <div className="flex items-end gap-2">
+          <input
+            ref={fileRef}
+            type="file"
+            accept={MEDIA_ACCEPT}
+            className="hidden"
+            onChange={(e) => {
+              void attachFromFile(e.target.files?.[0]);
+              e.target.value = "";
+            }}
+          />
+          <button
+            onClick={() => fileRef.current?.click()}
+            title="Attach a photo or document"
+            className="grid h-10 w-10 shrink-0 place-items-center rounded-xl border border-border text-muted hover:bg-slate-50 hover:text-foreground"
+          >
+            <Paperclip size={16} />
+          </button>
           <textarea
             value={text}
             onChange={(e) => setText(e.target.value)}
@@ -1236,11 +1394,18 @@ function ConversationView({
                 void send();
               }
             }}
+            onPaste={(e) => {
+              const f = fileFromPaste(e);
+              if (f) {
+                e.preventDefault();
+                void attachFromFile(f);
+              }
+            }}
             className="max-h-28 min-h-[40px] flex-1 resize-none rounded-xl border border-border bg-white px-3 py-2 text-sm outline-none focus:border-brand"
           />
           <button
             onClick={send}
-            disabled={sending || !text.trim()}
+            disabled={sending || (!text.trim() && !media)}
             className="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-brand text-white disabled:opacity-50"
             title="Send"
           >
@@ -1262,6 +1427,14 @@ function ChatBubble({
 }) {
   const outbound = m.direction === "OUTBOUND";
   const [deleting, setDeleting] = useState(false);
+
+  // Outbound media is already a public URL we host → embed directly. Inbound
+  // (private Twilio) media goes through the authenticated proxy.
+  const mediaSrc = m.mediaUrl
+    ? outbound
+      ? m.mediaUrl
+      : admin.messageMediaUrl(m.id)
+    : null;
 
   async function remove() {
     if (deleting) return;
@@ -1285,18 +1458,18 @@ function ChatBubble({
         {m.messageBody?.trim() && (
           <p className="whitespace-pre-wrap break-words">{m.messageBody}</p>
         )}
-        {m.mediaUrl && (
+        {mediaSrc && (
           <a
-            href={admin.messageMediaUrl(m.id)}
+            href={mediaSrc}
             target="_blank"
             rel="noreferrer"
             className={m.messageBody?.trim() ? "mt-1.5 block" : "block"}
-            title="Open full-size image in a new tab"
+            title="Open full-size attachment in a new tab"
           >
             {/* eslint-disable-next-line @next/next/no-img-element */}
             <img
-              src={admin.messageMediaUrl(m.id)}
-              alt="Attached media"
+              src={mediaSrc}
+              alt="Attachment"
               loading="lazy"
               className="max-h-44 max-w-[12rem] rounded-lg object-cover"
             />

@@ -15,7 +15,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { auth, admin, ApiError } from "@/lib/api";
-import type { IncomingMessage, MessageChannel } from "@/lib/types";
+import type { IncomingMessage, MessageChannel, OutboundMedia } from "@/lib/types";
 import { getAdminKey, setAdminKey, clearAdminKey } from "@/lib/adminSession";
 import { useRotaEvents } from "@/lib/useRotaEvents";
 import BoardGrid from "@/components/admin/BoardGrid";
@@ -190,9 +190,14 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
   // Send an outbound reply and prepend it (newest-first) for instant feedback.
   // The server also emits message.received, so other admins refresh too.
   const replyToMessage = useCallback(
-    async (recipientPhone: string, body: string, channel: MessageChannel) => {
+    async (
+      recipientPhone: string,
+      body: string,
+      channel: MessageChannel,
+      media?: OutboundMedia
+    ) => {
       const channelType = channel === "WHATSAPP" ? "whatsapp" : "sms";
-      const { message } = await admin.replyToMessage(recipientPhone, body, channelType);
+      const { message } = await admin.replyToMessage(recipientPhone, body, channelType, media);
       setMessages((prev) => [message, ...prev]);
     },
     []
@@ -228,9 +233,14 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
 
   // Ad-hoc outbound to any number; prepend the logged OUTBOUND row for feedback.
   const sendDirectMessage = useCallback(
-    async (phoneNumber: string, body: string, channel: MessageChannel) => {
+    async (
+      phoneNumber: string,
+      body: string,
+      channel: MessageChannel,
+      media?: OutboundMedia
+    ) => {
       const channelType = channel === "WHATSAPP" ? "whatsapp" : "sms";
-      const { message } = await admin.sendDirectMessage(phoneNumber, body, channelType);
+      const { message } = await admin.sendDirectMessage(phoneNumber, body, channelType, media);
       setMessages((prev) => [message, ...prev]);
     },
     []

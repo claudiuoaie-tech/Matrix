@@ -2,6 +2,7 @@ import "dotenv/config";
 import express from "express";
 import cors from "cors";
 import { webhooksRouter } from "./routes/webhooks";
+import { publicRouter } from "./routes/public";
 import { authRouter } from "./routes/auth";
 import { workerRouter } from "./routes/worker";
 import { adminRouter } from "./routes/admin";
@@ -48,6 +49,7 @@ app.get("/health", (_req, res) => {
 });
 
 app.use("/api/webhooks", webhooksRouter);
+app.use("/api/public", publicRouter);
 app.use("/api/auth", authRouter);
 app.use("/api/worker", workerRouter);
 app.use("/api/admin", adminRouter);

@@ -13,6 +13,7 @@ import type {
   ImportSummary,
   InboxResponse,
   IncomingMessage,
+  OutboundMedia,
   RecipientCandidate,
   RotaResponse,
   RotaStatus,
@@ -273,12 +274,13 @@ export const admin = {
   replyToMessage: (
     recipientPhone: string,
     messageBody: string,
-    channelType: "sms" | "whatsapp"
+    channelType: "sms" | "whatsapp",
+    media?: OutboundMedia
   ) =>
     request<{ ok: boolean; message: IncomingMessage }>("/api/admin/messages/reply", {
       method: "POST",
       admin: true,
-      body: { recipientPhone, messageBody, channelType },
+      body: { recipientPhone, messageBody, channelType, media },
     }),
   deleteMessage: (id: string) =>
     request<{ ok: boolean }>(`/api/admin/messages/${id}`, {
@@ -299,12 +301,13 @@ export const admin = {
   sendDirectMessage: (
     phoneNumber: string,
     messageBody: string,
-    channelType: "sms" | "whatsapp"
+    channelType: "sms" | "whatsapp",
+    media?: OutboundMedia
   ) =>
     request<{ ok: boolean; message: IncomingMessage }>("/api/admin/messages/send-direct", {
       method: "POST",
       admin: true,
-      body: { phoneNumber, messageBody, channelType },
+      body: { phoneNumber, messageBody, channelType, media },
     }),
   // Proxied URL for an inbound media attachment. Twilio media is private, so we
   // stream it via the backend; the admin key rides as a query param so it works

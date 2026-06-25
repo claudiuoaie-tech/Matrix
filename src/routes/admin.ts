@@ -12,6 +12,7 @@ import { isRtwExpired } from "../lib/rtw";
 import { parseCsv, buildCsv, parseFlexibleDate } from "../lib/csv";
 import { fireWebhook } from "../services/webhook.service";
 import { seedDemoData } from "../lib/seedDemo";
+import { saveOutboundMedia } from "../lib/outboundMedia";
 import {
   mondayKey,
   windowKeys,
@@ -1059,6 +1060,22 @@ function parseChannelType(raw: unknown): MessageChannel {
 }
 
 /**
+ * Resolve an optional outbound attachment (a `{ data }` base64 data URL in the
+ * request body) into a public URL Twilio can fetch. Returns `{ error }` for an
+ * unsupported / oversized file so the caller can 400.
+ */
+function resolveOutboundMediaUrl(media: unknown): { url: string | null; error?: string } {
+  if (!media || typeof media !== "object") return { url: null };
+  const data = (media as { data?: unknown }).data;
+  if (typeof data !== "string" || !data) return { url: null };
+  const saved = saveOutboundMedia(data);
+  if (!saved) {
+    return { url: null, error: "Unsupported or oversized attachment (images & PDF up to 5 MB)." };
+  }
+  return { url: saved.publicUrl };
+}
+
+/**
  * Send an outbound SMS/WhatsApp message and log it to the inbox as an OUTBOUND,
  * already-read row so it threads with the contact and never inflates "unread".
  * Works for ANY number — links to a Worker by phone when one matches, otherwise
@@ -1067,10 +1084,11 @@ function parseChannelType(raw: unknown): MessageChannel {
 async function sendOutboundMessage(
   phone: string,
   body: string,
-  channel: MessageChannel
+  channel: MessageChannel,
+  mediaUrl: string | null
 ) {
   // Send via Twilio (mock-logs without real creds; never throws on a bad number).
-  await sendMessage(phone, body, channel);
+  await sendMessage(phone, body, channel, mediaUrl ? [mediaUrl] : undefined);
 
   // Link to a worker by phone so the message threads under their name (if any).
   const worker = await prisma.worker.findUnique({
@@ -1086,6 +1104,7 @@ async function sendOutboundMessage(
       direction: "OUTBOUND",
       workerId: worker?.id ?? null,
       isRead: true,
+      mediaUrl,
     },
   });
 
@@ -1116,14 +1135,20 @@ adminRouter.post(
   async (req: Request, res: Response): Promise<void> => {
     const recipientPhone = String(req.body?.recipientPhone ?? "").trim();
     const messageBody = String(req.body?.messageBody ?? "").trim();
-    if (!recipientPhone || !messageBody) {
-      res.status(400).json({ error: "recipientPhone and messageBody are required." });
+    const media = resolveOutboundMediaUrl(req.body?.media);
+    if (media.error) {
+      res.status(400).json({ error: media.error });
+      return;
+    }
+    if (!recipientPhone || (!messageBody && !media.url)) {
+      res.status(400).json({ error: "recipientPhone and a message or attachment are required." });
       return;
     }
     const message = await sendOutboundMessage(
       recipientPhone,
       messageBody,
-      parseChannelType(req.body?.channelType)
+      parseChannelType(req.body?.channelType),
+      media.url
     );
     res.status(201).json({ ok: true, message });
   }
@@ -1139,14 +1164,20 @@ adminRouter.post(
   async (req: Request, res: Response): Promise<void> => {
     const phoneNumber = String(req.body?.phoneNumber ?? "").trim();
     const messageBody = String(req.body?.messageBody ?? "").trim();
-    if (!phoneNumber || !messageBody) {
-      res.status(400).json({ error: "phoneNumber and messageBody are required." });
+    const media = resolveOutboundMediaUrl(req.body?.media);
+    if (media.error) {
+      res.status(400).json({ error: media.error });
+      return;
+    }
+    if (!phoneNumber || (!messageBody && !media.url)) {
+      res.status(400).json({ error: "phoneNumber and a message or attachment are required." });
       return;
     }
     const message = await sendOutboundMessage(
       phoneNumber,
       messageBody,
-      parseChannelType(req.body?.channelType)
+      parseChannelType(req.body?.channelType),
+      media.url
     );
     res.status(201).json({ ok: true, message });
   }
