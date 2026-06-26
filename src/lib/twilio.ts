@@ -15,6 +15,31 @@ export const TWILIO_WHATSAPP_FROM =
 export type SendChannel = "SMS" | "WHATSAPP";
 
 /**
+ * Outcome of a dispatch attempt. Senders never throw — they report success or
+ * failure here so the caller can decide whether to surface it (e.g. a single
+ * ad-hoc reply should fail loudly, while a bulk broadcast keeps going).
+ *
+ *  - ok=true,  mock=true  → no real creds; logged only (treated as success).
+ *  - ok=true             → Twilio accepted the message.
+ *  - ok=false            → Twilio rejected it; `code`/`message` carry the reason.
+ */
+export interface SendResult {
+  ok: boolean;
+  mock?: boolean;
+  code?: string | number;
+  message?: string;
+}
+
+/** Pull Twilio's numeric error code + message off a thrown error, defensively. */
+function describeTwilioError(err: unknown): { code?: string | number; message: string } {
+  const e = err as { code?: string | number; status?: number; message?: string } | null;
+  return {
+    code: e?.code ?? e?.status,
+    message: e?.message ?? String(err),
+  };
+}
+
+/**
  * Whether real Twilio credentials are configured. The .env.example ships with
  * obvious placeholders ("ACxxxx...", "your_auth_token_here"); we treat those as
  * "not configured" so local dev and the test harness run in mock mode rather
@@ -44,23 +69,28 @@ export async function sendSms(
   to: string,
   body: string,
   mediaUrls?: string[]
-): Promise<void> {
+): Promise<SendResult> {
   if (!twilioClient || !TWILIO_FROM_NUMBER) {
     console.log(
       `[sms:mock] -> ${to}: ${body}${mediaUrls?.length ? ` [media: ${mediaUrls.join(", ")}]` : ""}`
     );
-    return;
+    return { ok: true, mock: true };
   }
 
   try {
+    // SMS path: plain E.164 numbers, no channel prefixing — kept entirely
+    // separate from the WhatsApp formatting below so the two can't bleed.
     await twilioClient.messages.create({
       to,
       from: TWILIO_FROM_NUMBER,
       body,
       ...(mediaUrls?.length ? { mediaUrl: mediaUrls } : {}),
     });
+    return { ok: true };
   } catch (err) {
-    console.error(`[sms] failed to send to ${to}:`, err);
+    const { code, message } = describeTwilioError(err);
+    console.error("Twilio SMS Send Error:", message, code);
+    return { ok: false, code, message };
   }
 }
 
@@ -78,23 +108,33 @@ export async function sendWhatsApp(
   to: string,
   body: string,
   mediaUrls?: string[]
-): Promise<void> {
+): Promise<SendResult> {
   if (!twilioClient || !TWILIO_WHATSAPP_FROM) {
     console.log(
       `[whatsapp:mock] -> ${to}: ${body}${mediaUrls?.length ? ` [media: ${mediaUrls.join(", ")}]` : ""}`
     );
-    return;
+    return { ok: true, mock: true };
   }
+
+  // Both endpoints MUST carry the "whatsapp:" prefix; toWhatsApp() adds it
+  // idempotently so an already-prefixed sender/recipient isn't doubled up.
+  const from = toWhatsApp(TWILIO_WHATSAPP_FROM);
+  const dest = toWhatsApp(to);
 
   try {
     await twilioClient.messages.create({
-      to: toWhatsApp(to),
-      from: toWhatsApp(TWILIO_WHATSAPP_FROM),
+      to: dest,
+      from,
       body,
       ...(mediaUrls?.length ? { mediaUrl: mediaUrls } : {}),
     });
+    return { ok: true };
   } catch (err) {
-    console.error(`[whatsapp] failed to send to ${to}:`, err);
+    // Surface the exact Twilio code (e.g. 63015 number not on WhatsApp, 63016
+    // free-form outside 24h window, 21910 from/to channel mismatch) in the logs.
+    const { code, message } = describeTwilioError(err);
+    console.error("Twilio WhatsApp Send Error:", message, code, `(from=${from} to=${dest})`);
+    return { ok: false, code, message };
   }
 }
 
@@ -104,7 +144,7 @@ export async function sendMessage(
   body: string,
   channel: SendChannel = "SMS",
   mediaUrls?: string[]
-): Promise<void> {
+): Promise<SendResult> {
   return channel === "WHATSAPP"
     ? sendWhatsApp(to, body, mediaUrls)
     : sendSms(to, body, mediaUrls);

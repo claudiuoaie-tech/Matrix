@@ -1088,7 +1088,18 @@ async function sendOutboundMessage(
   mediaUrl: string | null
 ) {
   // Send via Twilio (mock-logs without real creds; never throws on a bad number).
-  await sendMessage(phone, body, channel, mediaUrl ? [mediaUrl] : undefined);
+  // A genuine rejection (bad number, WhatsApp 24h window, channel mismatch) must
+  // fail loudly here — otherwise we'd log a phantom "sent" row and the admin UI
+  // would report success for a message that never left Twilio.
+  const result = await sendMessage(phone, body, channel, mediaUrl ? [mediaUrl] : undefined);
+  if (!result.ok) {
+    throw new HttpError(
+      502,
+      `${channel} send failed${result.code ? ` (Twilio ${result.code})` : ""}: ${
+        result.message ?? "unknown error"
+      }`
+    );
+  }
 
   // Link to a worker by phone so the message threads under their name (if any).
   const worker = await prisma.worker.findUnique({
@@ -1144,13 +1155,21 @@ adminRouter.post(
       res.status(400).json({ error: "recipientPhone and a message or attachment are required." });
       return;
     }
-    const message = await sendOutboundMessage(
-      recipientPhone,
-      messageBody,
-      parseChannelType(req.body?.channelType),
-      media.url
-    );
-    res.status(201).json({ ok: true, message });
+    try {
+      const message = await sendOutboundMessage(
+        recipientPhone,
+        messageBody,
+        parseChannelType(req.body?.channelType),
+        media.url
+      );
+      res.status(201).json({ ok: true, message });
+    } catch (err) {
+      if (err instanceof HttpError) {
+        res.status(err.status).json({ error: err.message });
+        return;
+      }
+      throw err;
+    }
   }
 );
 
@@ -1173,13 +1192,21 @@ adminRouter.post(
       res.status(400).json({ error: "phoneNumber and a message or attachment are required." });
       return;
     }
-    const message = await sendOutboundMessage(
-      phoneNumber,
-      messageBody,
-      parseChannelType(req.body?.channelType),
-      media.url
-    );
-    res.status(201).json({ ok: true, message });
+    try {
+      const message = await sendOutboundMessage(
+        phoneNumber,
+        messageBody,
+        parseChannelType(req.body?.channelType),
+        media.url
+      );
+      res.status(201).json({ ok: true, message });
+    } catch (err) {
+      if (err instanceof HttpError) {
+        res.status(err.status).json({ error: err.message });
+        return;
+      }
+      throw err;
+    }
   }
 );
 
