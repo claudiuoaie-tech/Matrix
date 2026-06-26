@@ -11,6 +11,34 @@ export const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER ?? "";
 export const TWILIO_WHATSAPP_FROM =
   process.env.TWILIO_WHATSAPP_FROM ?? TWILIO_FROM_NUMBER;
 
+/**
+ * Approved WhatsApp template (Content API) used for BUSINESS-INITIATED sends —
+ * i.e. messaging someone (a recruit, or a worker who hasn't replied in the last
+ * 24h) outside the open conversation window. Meta silently drops free-form text
+ * in that situation (Twilio accepts it, then it fails delivery with code 63016),
+ * so a pre-approved template is the only way through.
+ *
+ * Set TWILIO_WHATSAPP_TEMPLATE_SID to a Content SID (HX…) whose body is a single
+ * variable, e.g. "{{1}}". The operator's typed message is injected as {{1}}.
+ * When unset, WhatsApp sends as free-form (works only inside the 24h window).
+ */
+const WHATSAPP_TEMPLATE_SID = process.env.TWILIO_WHATSAPP_TEMPLATE_SID || "";
+
+/** Public base URL, for building the delivery status-callback webhook. */
+function publicBaseUrl(): string {
+  return (process.env.PUBLIC_BASE_URL ?? process.env.RENDER_EXTERNAL_URL ?? "").replace(/\/$/, "");
+}
+
+/**
+ * Delivery status callback. messages.create only tells us the message was
+ * ACCEPTED/QUEUED — the real outcome (delivered / undelivered + errorCode like
+ * 63016) arrives asynchronously at this webhook, which logs it.
+ */
+function statusCallbackUrl(): string | undefined {
+  const base = publicBaseUrl();
+  return base ? `${base}/api/webhooks/twilio/status` : undefined;
+}
+
 /** Outbound channels a message can be dispatched on. */
 export type SendChannel = "SMS" | "WHATSAPP";
 
@@ -110,15 +138,18 @@ export async function sendSms(
     return { ok: true, mock: true };
   }
 
+  const statusCallback = statusCallbackUrl();
   try {
     // SMS path: E.164 number, no channel prefixing — kept entirely separate
     // from the WhatsApp formatting below so the two can't bleed.
-    await twilioClient.messages.create({
+    const message = await twilioClient.messages.create({
       to: toE164(to),
       from: TWILIO_FROM_NUMBER,
       body,
+      ...(statusCallback ? { statusCallback } : {}),
       ...(mediaUrls?.length ? { mediaUrl: mediaUrls } : {}),
     });
+    console.log(`[sms] accepted sid=${message.sid} status=${message.status} -> ${toE164(to)}`);
     return { ok: true };
   } catch (err) {
     const { code, message } = describeTwilioError(err);
@@ -153,14 +184,27 @@ export async function sendWhatsApp(
   // idempotently so an already-prefixed sender/recipient isn't doubled up.
   const from = toWhatsApp(TWILIO_WHATSAPP_FROM);
   const dest = toWhatsApp(to);
+  const statusCallback = statusCallbackUrl();
+  const usingTemplate = !!WHATSAPP_TEMPLATE_SID && !mediaUrls?.length;
 
   try {
-    await twilioClient.messages.create({
+    const message = await twilioClient.messages.create({
       to: dest,
       from,
-      body,
+      ...(statusCallback ? { statusCallback } : {}),
+      // Business-initiated (outside the 24h window): send the approved template
+      // with the operator's text as variable {{1}}. Otherwise free-form body.
+      ...(usingTemplate
+        ? { contentSid: WHATSAPP_TEMPLATE_SID, contentVariables: JSON.stringify({ "1": body }) }
+        : { body }),
       ...(mediaUrls?.length ? { mediaUrl: mediaUrls } : {}),
     });
+    // status here is the INITIAL state (queued/accepted) — final delivery is
+    // reported later at the status webhook. Logging the SID lets us correlate.
+    console.log(
+      `[whatsapp] accepted sid=${message.sid} status=${message.status}` +
+        `${usingTemplate ? " (template)" : ""} -> ${dest}`
+    );
     return { ok: true };
   } catch (err) {
     // Surface the exact Twilio code (e.g. 63015 number not on WhatsApp, 63016

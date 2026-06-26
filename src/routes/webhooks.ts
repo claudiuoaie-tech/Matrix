@@ -188,6 +188,38 @@ webhooksRouter.post(
 );
 
 /**
+ * POST /api/webhooks/twilio/status
+ *
+ * Delivery status callback. messages.create only reports the INITIAL state
+ * (queued/accepted); the real outcome — delivered, or undelivered/failed with
+ * an ErrorCode — lands here moments later. This is what reveals WhatsApp 63016
+ * ("free-form message outside the 24h window — use a template"), the usual
+ * reason a business-initiated message is accepted but never received.
+ *
+ * Log-only: no DB writes, no state change, so it stays a pure diagnostic.
+ */
+webhooksRouter.post(
+  "/twilio/status",
+  validateTwilioSignature,
+  (req: Request, res: Response): void => {
+    const b = req.body ?? {};
+    const status = String(b.MessageStatus ?? b.SmsStatus ?? "");
+    const sid = String(b.MessageSid ?? b.SmsSid ?? "");
+    const to = String(b.To ?? "");
+    const errorCode = b.ErrorCode ? String(b.ErrorCode) : "";
+    const line = `[delivery] sid=${sid} status=${status} to=${to}${
+      errorCode ? ` errorCode=${errorCode}` : ""
+    }`;
+    if (status === "undelivered" || status === "failed" || errorCode) {
+      console.error(line, b.ErrorMessage ? `errorMessage=${b.ErrorMessage}` : "");
+    } else {
+      console.log(line);
+    }
+    res.sendStatus(204);
+  }
+);
+
+/**
  * Handle an acceptance via the shared allocation helper (transactional slot
  * re-check + real-time event emission), then reply over SMS.
  */
