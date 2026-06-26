@@ -15,6 +15,39 @@ export const TWILIO_WHATSAPP_FROM =
 export type SendChannel = "SMS" | "WHATSAPP";
 
 /**
+ * Default dialling code for bare national numbers (no "+" / no country code).
+ * Matrix operates in the UK, so a number entered as "07459327787" is assumed to
+ * be a UK mobile and rendered "+447459327787". Override via DEFAULT_DIAL_CODE.
+ */
+const DEFAULT_DIAL_CODE = (process.env.DEFAULT_DIAL_CODE ?? "44").replace(/\D/g, "");
+
+/**
+ * Normalise a human-entered phone number to E.164 ("+447459327787"), the only
+ * format Twilio accepts. Twilio rejects national formats like "07459327787"
+ * with error 21211, so we coerce here rather than at every call site.
+ *
+ *  - strips a leading "whatsapp:" channel prefix and any spaces/dashes/parens
+ *  - "+4474..."  → unchanged (already E.164)
+ *  - "004474..." → "+4474..."  (international access code)
+ *  - "07459..."  → "+44 7459..." (leading 0 = national trunk → default code)
+ *  - "4474..."   → "+4474..."   (bare country code, no plus)
+ *
+ * Anything else is returned with a leading "+" and left for Twilio to validate
+ * (and now log explicitly) rather than guessing wrongly.
+ */
+export function toE164(raw: string): string {
+  let n = String(raw)
+    .trim()
+    .replace(/^whatsapp:/i, "")
+    .replace(/[\s()\-.]/g, "");
+  if (!n) return n;
+  if (n.startsWith("+")) return n;
+  if (n.startsWith("00")) return "+" + n.slice(2);
+  if (n.startsWith("0")) return "+" + DEFAULT_DIAL_CODE + n.slice(1);
+  return "+" + n;
+}
+
+/**
  * Outcome of a dispatch attempt. Senders never throw — they report success or
  * failure here so the caller can decide whether to surface it (e.g. a single
  * ad-hoc reply should fail loudly, while a bulk broadcast keeps going).
@@ -78,10 +111,10 @@ export async function sendSms(
   }
 
   try {
-    // SMS path: plain E.164 numbers, no channel prefixing — kept entirely
-    // separate from the WhatsApp formatting below so the two can't bleed.
+    // SMS path: E.164 number, no channel prefixing — kept entirely separate
+    // from the WhatsApp formatting below so the two can't bleed.
     await twilioClient.messages.create({
-      to,
+      to: toE164(to),
       from: TWILIO_FROM_NUMBER,
       body,
       ...(mediaUrls?.length ? { mediaUrl: mediaUrls } : {}),
@@ -94,9 +127,9 @@ export async function sendSms(
   }
 }
 
-/** Normalise an address to a WhatsApp endpoint ("whatsapp:+44…"). */
+/** Normalise an address to a WhatsApp endpoint ("whatsapp:+44…", E.164 body). */
 function toWhatsApp(addr: string): string {
-  return `whatsapp:${addr.trim().replace(/^whatsapp:/i, "")}`;
+  return `whatsapp:${toE164(addr)}`;
 }
 
 /**
