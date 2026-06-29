@@ -4,7 +4,9 @@ import path from "path";
 import { randomUUID } from "crypto";
 import type { ClientPool, RotaStatus, DocType, MessageChannel } from "@prisma/client";
 import { prisma } from "../lib/prisma";
-import { sendSms, sendMessage } from "../lib/twilio";
+import { sendSms } from "../lib/twilio";
+import { dispatchMessage } from "../lib/messaging";
+import { whapiMediaAuthHeader, isWhapiMediaUrl } from "../lib/whapi";
 import { bus, emitRotaEvent, RotaEvent } from "../lib/events";
 import { revokeSessions } from "../lib/auth";
 import { requireAdmin } from "../lib/adminAuth";
@@ -903,8 +905,9 @@ adminRouter.post("/broadcast", async (req: Request, res: Response): Promise<void
     where: { id: { in: workerIds }, status: "ACTIVE", deletedAt: null },
   });
 
-  // Dispatch to every recipient on the chosen channel (SMS or WhatsApp).
-  await Promise.all(workers.map((w) => sendMessage(w.phone, messageBody, channel)));
+  // Dispatch to every recipient on the chosen channel (SMS via Twilio,
+  // WhatsApp via Whapi).
+  await Promise.all(workers.map((w) => dispatchMessage(w.phone, messageBody, channel)));
 
   // Optionally seed PROPOSED allocations for a specific shift.
   let proposed = 0;
@@ -1019,10 +1022,13 @@ adminRouter.get(
     const sid = process.env.TWILIO_ACCOUNT_SID;
     const token = process.env.TWILIO_AUTH_TOKEN;
     const headers: Record<string, string> = {};
-    // Authenticate the upstream fetch for Twilio-hosted media. (On the cross-
-    // origin redirect to Twilio's CDN, fetch drops the auth header automatically.)
+    // Authenticate the upstream fetch per host: Twilio MMS media needs Basic
+    // (SID:token); Whapi-hosted WhatsApp media needs the channel bearer token.
     if (sid && token && /(?:^|\.)twilio\.com\//.test(msg.mediaUrl)) {
       headers.Authorization = "Basic " + Buffer.from(`${sid}:${token}`).toString("base64");
+    } else if (isWhapiMediaUrl(msg.mediaUrl)) {
+      const bearer = whapiMediaAuthHeader();
+      if (bearer) headers.Authorization = bearer;
     }
 
     try {
@@ -1087,15 +1093,15 @@ async function sendOutboundMessage(
   channel: MessageChannel,
   mediaUrl: string | null
 ) {
-  // Send via Twilio (mock-logs without real creds; never throws on a bad number).
-  // A genuine rejection (bad number, WhatsApp 24h window, channel mismatch) must
-  // fail loudly here — otherwise we'd log a phantom "sent" row and the admin UI
-  // would report success for a message that never left Twilio.
-  const result = await sendMessage(phone, body, channel, mediaUrl ? [mediaUrl] : undefined);
+  // Dispatch on the chosen channel (SMS → Twilio, WhatsApp → Whapi). Both
+  // mock-log without creds and never throw on a bad number. A genuine rejection
+  // must fail loudly here — otherwise we'd log a phantom "sent" row and the
+  // admin UI would report success for a message that never left the provider.
+  const result = await dispatchMessage(phone, body, channel, mediaUrl ? [mediaUrl] : undefined);
   if (!result.ok) {
     throw new HttpError(
       502,
-      `${channel} send failed${result.code ? ` (Twilio ${result.code})` : ""}: ${
+      `${channel} send failed${result.code ? ` (${result.code})` : ""}: ${
         result.message ?? "unknown error"
       }`
     );
