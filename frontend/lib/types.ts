@@ -91,6 +91,9 @@ export interface TemplateVariable {
   position: string; // "1".."N"
   label: string;
   sample: string;
+  // "worker_name" → personalised per recipient from the matched worker in a bulk
+  // send; the typed value is only a fallback for unmatched manual numbers.
+  source?: "worker_name";
 }
 
 /** An approved WhatsApp (Meta) template available for out-of-session sends. */

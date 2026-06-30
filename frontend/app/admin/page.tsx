@@ -262,6 +262,16 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
     []
   );
 
+  // Bulk approved-template send (out-of-session WhatsApp to many recipients).
+  const sendBulkTemplateMessage = useCallback(
+    async (recipients: string[], templateKey: string, variables: Record<string, string>) => {
+      const res = await admin.sendBulkTemplate(recipients, templateKey, variables);
+      if (res.messages.length) setMessages((prev) => [...res.messages, ...prev]);
+      return { sent: res.sent, failed: res.failed, results: res.results };
+    },
+    []
+  );
+
   // Out-of-session WhatsApp via an approved template; prepend the preview row and
   // reload so the freshly-opened window (if the contact replies) stays accurate.
   const sendTemplateMessage = useCallback(
@@ -359,6 +369,7 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
           windows={windows}
           templates={templates}
           onSendTemplate={sendTemplateMessage}
+          onSendBulkTemplate={sendBulkTemplateMessage}
         />
       )}
     </main>

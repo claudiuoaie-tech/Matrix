@@ -34,12 +34,19 @@ import type {
   RecipientCandidate,
 } from "@/lib/types";
 
-/** Bulk-send handler: returns the per-recipient summary for the composer. */
+/** Bulk free-text send: returns the per-recipient summary for the composer. */
 type SendBulkFn = (
   recipients: string[],
   body: string,
   channel: MessageChannel,
   media?: OutboundMedia
+) => Promise<{ sent: number; failed: number; results: BulkResultRow[] }>;
+
+/** Bulk approved-template send: same per-recipient summary shape. */
+type SendBulkTemplateFn = (
+  recipients: string[],
+  templateKey: string,
+  variables: Record<string, string>
 ) => Promise<{ sent: number; failed: number; results: BulkResultRow[] }>;
 import { SLOT_LABELS, formatDate } from "@/lib/ui";
 import { STATUS_STYLES, cellText } from "@/lib/boardUi";
@@ -70,6 +77,7 @@ export default function BroadcastEngine({
   windows,
   templates,
   onSendTemplate,
+  onSendBulkTemplate,
 }: {
   messages: IncomingMessage[];
   unread: number;
@@ -93,6 +101,7 @@ export default function BroadcastEngine({
     templateKey: string,
     variables: Record<string, string>
   ) => Promise<void>;
+  onSendBulkTemplate: SendBulkTemplateFn;
 }) {
   // The inbox feed/unread/mark-all state is owned by the parent AdminConsole so
   // the unread badge stays live on the Broadcast Engine tab even when another
@@ -135,6 +144,7 @@ export default function BroadcastEngine({
           windows={windows}
           templates={templates}
           onSendTemplate={onSendTemplate}
+          onSendBulkTemplate={onSendBulkTemplate}
         />
       )}
     </div>
@@ -723,6 +733,7 @@ function InboxPane({
   windows,
   templates,
   onSendTemplate,
+  onSendBulkTemplate,
 }: {
   messages: IncomingMessage[];
   loading: boolean;
@@ -746,6 +757,7 @@ function InboxPane({
     templateKey: string,
     variables: Record<string, string>
   ) => Promise<void>;
+  onSendBulkTemplate: SendBulkTemplateFn;
 }) {
   // All / Unread filter (operates on threads). "unread" = threads with unread.
   const [filter, setFilter] = useState<"all" | "unread">("all");
@@ -978,7 +990,13 @@ function InboxPane({
       </div>
 
       {composeOpen && (
-        <NewMessageModal onClose={() => setComposeOpen(false)} onSendBulk={onSendBulk} />
+        <NewMessageModal
+          onClose={() => setComposeOpen(false)}
+          onSendBulk={onSendBulk}
+          onSendBulkTemplate={onSendBulkTemplate}
+          windows={windows}
+          templates={templates}
+        />
       )}
     </section>
   );
@@ -1157,21 +1175,31 @@ function RecipientTagInput({
 }
 
 /**
- * Ad-hoc outbound composer — now multi-recipient. Sends to many numbers at once
- * via /api/admin/messages/send-bulk; reports per-number failures in a summary.
+ * Ad-hoc outbound composer — multi-recipient, with a Bulk-Template mode for
+ * out-of-session WhatsApp. Sends via /api/admin/messages/send-bulk; reports
+ * per-number failures in a summary.
  */
 function NewMessageModal({
   onClose,
   onSendBulk,
+  onSendBulkTemplate,
+  windows,
+  templates,
 }: {
   onClose: () => void;
   onSendBulk: SendBulkFn;
+  onSendBulkTemplate: SendBulkTemplateFn;
+  windows: Record<string, string>;
+  templates: MessageTemplate[];
 }) {
   const [recipients, setRecipients] = useState<Recipient[]>([]);
   const [workers, setWorkers] = useState<RecipientCandidate[]>([]);
   const [channel, setChannel] = useState<MessageChannel>("SMS");
+  const [mode, setMode] = useState<"text" | "template">("text");
   const [body, setBody] = useState("");
   const [media, setMedia] = useState<OutboundMedia | null>(null);
+  const [templateKey, setTemplateKey] = useState("");
+  const [templateValues, setTemplateValues] = useState<Record<string, string>>({});
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [summary, setSummary] = useState<{
@@ -1189,6 +1217,40 @@ function NewMessageModal({
       .catch(() => {});
   }, []);
 
+  // Is a recipient inside its 24h WhatsApp window? (manual numbers never are.)
+  const isInWindow = useCallback(
+    (phone: string) => {
+      const exp = windows[normalizeToE164(phone)];
+      return !!exp && new Date(exp).getTime() > Date.now();
+    },
+    [windows]
+  );
+  const anyOutOfWindow =
+    channel === "WHATSAPP" && recipients.some((r) => !isInWindow(r.phone));
+
+  // SMS is always free-text. For WhatsApp, auto-engage Template mode as soon as
+  // any recipient is outside their window (free-text would partially fail) — the
+  // admin can still toggle modes manually.
+  useEffect(() => {
+    if (channel === "SMS") setMode("text");
+  }, [channel]);
+  useEffect(() => {
+    if (channel === "WHATSAPP" && anyOutOfWindow) setMode("template");
+  }, [channel, anyOutOfWindow]);
+
+  // Default the template selection, then seed its variable inputs from samples.
+  const activeTemplate = templates.find((t) => t.key === templateKey) ?? null;
+  useEffect(() => {
+    if (!templateKey && templates.length) setTemplateKey(templates[0].key);
+  }, [templates, templateKey]);
+  useEffect(() => {
+    if (!activeTemplate) return;
+    const seed: Record<string, string> = {};
+    for (const v of activeTemplate.variables) seed[v.position] = v.sample;
+    setTemplateValues(seed);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTemplate?.key]);
+
   async function attachFromFile(file: File | null | undefined) {
     if (!file) return;
     try {
@@ -1203,8 +1265,11 @@ function NewMessageModal({
       setError("Add at least one recipient.");
       return;
     }
-    const b = body.trim();
-    if (!b && !media) {
+    if (mode === "template" && !activeTemplate) {
+      setError("Choose a template.");
+      return;
+    }
+    if (mode === "text" && !body.trim() && !media) {
       setError("Enter a message or attach a file.");
       return;
     }
@@ -1212,12 +1277,11 @@ function NewMessageModal({
     setError(null);
     setSummary(null);
     try {
-      const res = await onSendBulk(
-        recipients.map((r) => r.phone),
-        b,
-        channel,
-        media ?? undefined
-      );
+      const phones = recipients.map((r) => r.phone);
+      const res =
+        mode === "template"
+          ? await onSendBulkTemplate(phones, activeTemplate!.key, templateValues)
+          : await onSendBulk(phones, body.trim(), channel, media ?? undefined);
       if (res.failed === 0) {
         onClose();
         return;
@@ -1288,30 +1352,107 @@ function NewMessageModal({
             <MessageCircle size={15} /> WhatsApp
           </button>
         </div>
+        {/* WhatsApp: Free-text vs Template mode toggle */}
         {channel === "WHATSAPP" && (
-          <p className="mb-3 text-[11px] text-amber-700">
-            WhatsApp free-text only reaches numbers that replied in the last 24h; others are
-            skipped — message them with an approved template from their conversation.
-          </p>
+          <>
+            <div className="mb-1 inline-flex rounded-lg border border-border p-0.5">
+              <button
+                type="button"
+                onClick={() => setMode("text")}
+                className={`rounded-md px-3 py-1.5 text-sm font-medium transition ${
+                  mode === "text" ? "bg-brand text-white" : "text-muted hover:text-foreground"
+                }`}
+              >
+                Free text
+              </button>
+              <button
+                type="button"
+                onClick={() => setMode("template")}
+                className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm font-medium transition ${
+                  mode === "template" ? "bg-emerald-600 text-white" : "text-muted hover:text-foreground"
+                }`}
+              >
+                <FileText size={14} /> Template
+              </button>
+            </div>
+            <p className="mb-3 text-[11px] text-amber-700">
+              {anyOutOfWindow
+                ? "Some recipients are outside the 24-hour window — free text won't reach them. Use an approved template to message everyone."
+                : "Free text only reaches numbers that replied in the last 24h. Templates reach anyone."}
+            </p>
+          </>
         )}
-        {channel === "SMS" && <div className="mb-3" />}
+        {channel === "SMS" && <div className="mb-1" />}
 
-        <label className="mb-1 block text-xs font-medium text-muted">Message</label>
-        {media && <AttachmentPreview media={media} onRemove={() => setMedia(null)} />}
-        <textarea
-          value={body}
-          onChange={(e) => setBody(e.target.value)}
-          onPaste={(e) => {
-            const f = fileFromPaste(e);
-            if (f) {
-              e.preventDefault();
-              void attachFromFile(f);
-            }
-          }}
-          rows={4}
-          placeholder="Type your message…"
-          className="w-full resize-none rounded-lg border border-border bg-white p-3 text-sm outline-none focus:border-brand"
-        />
+        {mode === "template" ? (
+          /* ---- Bulk template form ---- */
+          <div className="mb-1">
+            <label className="mb-1 block text-xs font-medium text-muted">Template</label>
+            {templates.length === 0 ? (
+              <p className="text-xs text-muted">No approved templates are configured.</p>
+            ) : (
+              <>
+                <select
+                  value={templateKey}
+                  onChange={(e) => setTemplateKey(e.target.value)}
+                  className="w-full rounded-lg border border-border bg-white px-3 py-2 text-sm outline-none focus:border-brand"
+                >
+                  {templates.map((t) => (
+                    <option key={t.key} value={t.key}>
+                      {t.displayName}
+                    </option>
+                  ))}
+                </select>
+                {activeTemplate && (
+                  <div className="mt-3 space-y-2">
+                    {activeTemplate.variables.map((v) => (
+                      <div key={v.position}>
+                        <label className="mb-1 block text-[11px] font-medium text-muted">
+                          {v.label}
+                          {v.source === "worker_name" && (
+                            <span className="ml-1 font-normal text-muted">· auto-filled per worker</span>
+                          )}
+                        </label>
+                        <input
+                          value={templateValues[v.position] ?? ""}
+                          onChange={(e) =>
+                            setTemplateValues((prev) => ({ ...prev, [v.position]: e.target.value }))
+                          }
+                          placeholder={
+                            v.source === "worker_name"
+                              ? "Auto-filled from each worker (fallback for manual numbers)"
+                              : v.sample
+                          }
+                          className="w-full rounded-lg border border-border bg-white px-3 py-2 text-sm outline-none focus:border-brand"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        ) : (
+          /* ---- Free-text message ---- */
+          <>
+            <label className="mb-1 block text-xs font-medium text-muted">Message</label>
+            {media && <AttachmentPreview media={media} onRemove={() => setMedia(null)} />}
+            <textarea
+              value={body}
+              onChange={(e) => setBody(e.target.value)}
+              onPaste={(e) => {
+                const f = fileFromPaste(e);
+                if (f) {
+                  e.preventDefault();
+                  void attachFromFile(f);
+                }
+              }}
+              rows={4}
+              placeholder="Type your message…"
+              className="w-full resize-none rounded-lg border border-border bg-white p-3 text-sm outline-none focus:border-brand"
+            />
+          </>
+        )}
 
         {error && <p className="mt-2 text-xs text-rose-600">{error}</p>}
 
@@ -1341,14 +1482,18 @@ function NewMessageModal({
           }}
         />
         <div className="mt-4 flex items-center justify-between gap-2">
-          <button
-            type="button"
-            onClick={() => fileRef.current?.click()}
-            title="Attach a photo or document"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-2 text-sm font-medium text-muted hover:bg-slate-50"
-          >
-            <Paperclip size={16} /> Attach
-          </button>
+          {mode === "text" ? (
+            <button
+              type="button"
+              onClick={() => fileRef.current?.click()}
+              title="Attach a photo or document"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-2 text-sm font-medium text-muted hover:bg-slate-50"
+            >
+              <Paperclip size={16} /> Attach
+            </button>
+          ) : (
+            <span />
+          )}
           <div className="flex items-center gap-2">
             <button
               onClick={onClose}
@@ -1358,11 +1503,22 @@ function NewMessageModal({
             </button>
             <button
               onClick={send}
-              disabled={sending || recipients.length === 0 || (!body.trim() && !media)}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-brand px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
+              disabled={
+                sending ||
+                recipients.length === 0 ||
+                (mode === "text" && !body.trim() && !media) ||
+                (mode === "template" && !activeTemplate)
+              }
+              className={`inline-flex items-center gap-1.5 rounded-lg px-4 py-2 text-sm font-medium text-white disabled:opacity-50 ${
+                mode === "template" ? "bg-emerald-600 hover:bg-emerald-700" : "bg-brand"
+              }`}
             >
               {sending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
-              {summary ? "Retry failed" : `Send${recipients.length ? ` to ${recipients.length}` : ""}`}
+              {summary
+                ? "Retry failed"
+                : mode === "template"
+                ? `Send template${recipients.length ? ` to ${recipients.length}` : ""}`
+                : `Send${recipients.length ? ` to ${recipients.length}` : ""}`}
             </button>
           </div>
         </div>

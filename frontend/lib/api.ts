@@ -323,6 +323,19 @@ export const admin = {
       admin: true,
       body: { recipients, messageBody, channelType, media },
     }),
+  // Fan an approved WhatsApp template out to many recipients (out-of-session ok).
+  // `variables` are the admin's global overrides (position → value); the
+  // worker-name slot is personalised server-side per matched recipient.
+  sendBulkTemplate: (
+    recipients: string[],
+    templateKey: string,
+    variables: Record<string, string>
+  ) =>
+    request<BulkSendResponse>("/api/admin/messages/send-bulk", {
+      method: "POST",
+      admin: true,
+      body: { recipients, channelType: "whatsapp", templateKey, variables },
+    }),
   // ---- WhatsApp templates (out-of-session) ----
   messageTemplates: () =>
     request<{ templates: MessageTemplate[] }>("/api/admin/templates", { admin: true }),

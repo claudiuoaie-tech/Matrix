@@ -10,6 +10,7 @@ import {
   resolveContentSid,
   templateCatalogForClient,
   buildTemplatePreview,
+  buildTemplateValues,
 } from "../lib/templates";
 import { bus, emitRotaEvent, RotaEvent } from "../lib/events";
 import { revokeSessions } from "../lib/auth";
@@ -1339,13 +1340,17 @@ interface BulkResultRow {
 }
 
 /**
- * POST /api/admin/messages/send-bulk — fan one message out to many recipients.
- * Body: { recipients: string[], messageBody, channelType: "sms" | "whatsapp",
- *         media? }. Recipients are normalised to E.164 and de-duplicated.
+ * POST /api/admin/messages/send-bulk — fan a message out to many recipients.
+ * Recipients are normalised to E.164 and de-duplicated. Two modes:
  *
- * SMS goes to everyone. WhatsApp free-text is gated per number by the 24h
- * window: a recipient outside their window is failed (not sent) with a reason
- * telling the operator to use an approved template instead. Returns a per-number
+ *  - Template mode (body has `templateKey` [+ optional `variables` overrides]):
+ *    approved-template fan-out via the Content API, in OR out of the 24h window.
+ *    Per recipient the worker-name slot is personalised from the matched Worker.
+ *  - Free-text mode (body has `messageBody`/`media`, `channelType`): SMS goes to
+ *    everyone; WhatsApp is gated per number by the 24h window, failing
+ *    out-of-window recipients with a reason to use a template.
+ *
+ * Both dispatch through the bounded mapThrottled() pool and return a per-number
  * result array + the logged OUTBOUND rows for the successes.
  */
 adminRouter.post(
@@ -1375,6 +1380,65 @@ adminRouter.post(
       res.status(400).json({ error: "At least one recipient is required." });
       return;
     }
+    const templateKey = String(req.body?.templateKey ?? "").trim();
+    const messagesOut: Awaited<ReturnType<typeof recordOutboundRow>>[] = [];
+
+    // ---- Bulk-template mode (out-of-session WhatsApp) ---------------------
+    // Approved-template fan-out: works in OR out of the 24h window, so it's the
+    // path for cold recruits and dormant workers. Per recipient, the worker-name
+    // slot is personalised from the matched Worker; other variables use the
+    // admin's global overrides (else the template sample).
+    if (templateKey) {
+      const template = getTemplate(templateKey);
+      if (!template) {
+        res.status(400).json({ error: `Unknown template "${templateKey}".` });
+        return;
+      }
+      const contentSid = resolveContentSid(template);
+      const overrides =
+        req.body?.variables && typeof req.body.variables === "object"
+          ? (req.body.variables as Record<string, unknown>)
+          : {};
+
+      const workers = await prisma.worker.findMany({
+        where: { phone: { in: recipients } },
+        select: { phone: true, name: true },
+      });
+      const nameByPhone = new Map(workers.map((w) => [w.phone, w.name]));
+
+      const results = await mapThrottled<string, BulkResultRow>(recipients, 8, async (phone) => {
+        try {
+          const values = buildTemplateValues(template, overrides, nameByPhone.get(phone));
+          const send = await sendWhatsAppTemplate(phone, contentSid, values);
+          if (!send.ok) return { phone, ok: false, code: send.code, error: send.message };
+          const row = await recordOutboundRow(
+            phone,
+            buildTemplatePreview(template, values),
+            "WHATSAPP",
+            null
+          );
+          messagesOut.push(row);
+          return { phone, ok: true };
+        } catch (err) {
+          return {
+            phone,
+            ok: false,
+            error: err instanceof Error ? err.message : "Template send failed",
+          };
+        }
+      });
+      const sent = results.filter((r) => r.ok).length;
+      res.status(201).json({
+        ok: true,
+        sent,
+        failed: results.length - sent,
+        results,
+        messages: messagesOut,
+      });
+      return;
+    }
+
+    // ---- Free-text mode ---------------------------------------------------
     if (!messageBody && !media.url) {
       res.status(400).json({ error: "A message or attachment is required." });
       return;
@@ -1390,7 +1454,6 @@ adminRouter.post(
       inWindow = new Set(open.map((c) => c.phone));
     }
 
-    const messagesOut: Awaited<ReturnType<typeof recordOutboundRow>>[] = [];
     const results = await mapThrottled<string, BulkResultRow>(recipients, 8, async (phone) => {
       try {
         // Block free-text WhatsApp outside the window — enforce template routing.
