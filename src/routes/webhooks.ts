@@ -64,6 +64,28 @@ async function logIncoming(
   }
 }
 
+/** The WhatsApp customer-care window is 24 hours from the contact's last reply. */
+const WHATSAPP_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * (Re)open the 24h WhatsApp window for a phone number on inbound reply. Upserts
+ * a WhatsappContact keyed by phone. Best-effort — a failure here must never
+ * block the worker's reply, so errors are swallowed.
+ */
+async function touchWhatsappWindow(phone: string): Promise<void> {
+  try {
+    const now = new Date();
+    const expires = new Date(now.getTime() + WHATSAPP_WINDOW_MS);
+    await prisma.whatsappContact.upsert({
+      where: { phone },
+      create: { phone, windowExpiresAt: expires, lastInboundAt: now },
+      update: { windowExpiresAt: expires, lastInboundAt: now },
+    });
+  } catch (err) {
+    console.error("[whatsapp window] failed to update contact window:", err);
+  }
+}
+
 /** True if the reply contains an accept signal: a standalone "1" or "YES". */
 function isAffirmative(body: string): boolean {
   return /\b1\b/.test(body) || /\byes\b/i.test(body);
@@ -131,6 +153,13 @@ webhooksRouter.post(
         worker ? { id: worker.id, name: worker.name } : null,
         mediaUrl
       );
+
+      // A WhatsApp reply (re)opens the 24h customer-care window for this contact,
+      // during which the admin may free-text them. Tracked per phone so it also
+      // covers cold recruits with no Worker record. Best-effort.
+      if (channel === "WHATSAPP") {
+        await touchWhatsappWindow(from);
+      }
 
       // Unknown sender, or worker not eligible to respond -> safe no-op.
       if (!worker || worker.status === "INACTIVE" || worker.status === "SUSPENDED") {

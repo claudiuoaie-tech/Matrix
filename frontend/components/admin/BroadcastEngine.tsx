@@ -28,6 +28,7 @@ import type {
   ClientLite,
   IncomingMessage,
   MessageChannel,
+  MessageTemplate,
   OutboundMedia,
   RecipientCandidate,
 } from "@/lib/types";
@@ -57,6 +58,9 @@ export default function BroadcastEngine({
   onClearRead,
   onBulkDelete,
   onSendDirect,
+  windows,
+  templates,
+  onSendTemplate,
 }: {
   messages: IncomingMessage[];
   unread: number;
@@ -77,6 +81,13 @@ export default function BroadcastEngine({
     body: string,
     channel: MessageChannel,
     media?: OutboundMedia
+  ) => Promise<void>;
+  windows: Record<string, string>;
+  templates: MessageTemplate[];
+  onSendTemplate: (
+    phoneNumber: string,
+    templateKey: string,
+    variables: Record<string, string>
   ) => Promise<void>;
 }) {
   // The inbox feed/unread/mark-all state is owned by the parent AdminConsole so
@@ -117,6 +128,9 @@ export default function BroadcastEngine({
           onClearRead={onClearRead}
           onBulkDelete={onBulkDelete}
           onSendDirect={onSendDirect}
+          windows={windows}
+          templates={templates}
+          onSendTemplate={onSendTemplate}
         />
       )}
     </div>
@@ -702,6 +716,9 @@ function InboxPane({
   onClearRead,
   onBulkDelete,
   onSendDirect,
+  windows,
+  templates,
+  onSendTemplate,
 }: {
   messages: IncomingMessage[];
   loading: boolean;
@@ -722,6 +739,13 @@ function InboxPane({
     body: string,
     channel: MessageChannel,
     media?: OutboundMedia
+  ) => Promise<void>;
+  windows: Record<string, string>;
+  templates: MessageTemplate[];
+  onSendTemplate: (
+    phoneNumber: string,
+    templateKey: string,
+    variables: Record<string, string>
   ) => Promise<void>;
 }) {
   // All / Unread filter (operates on threads). "unread" = threads with unread.
@@ -847,6 +871,9 @@ function InboxPane({
           onBack={() => setOpenPhone(null)}
           onReply={onReply}
           onDelete={onDelete}
+          windowExpiry={windows[openThread.phone] ?? null}
+          templates={templates}
+          onSendTemplate={onSendTemplate}
         />
       </section>
     );
@@ -1291,6 +1318,9 @@ function ConversationView({
   onBack,
   onReply,
   onDelete,
+  windowExpiry,
+  templates,
+  onSendTemplate,
 }: {
   thread: Thread;
   onBack: () => void;
@@ -1301,6 +1331,13 @@ function ConversationView({
     media?: OutboundMedia
   ) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
+  windowExpiry: string | null;
+  templates: MessageTemplate[];
+  onSendTemplate: (
+    phoneNumber: string,
+    templateKey: string,
+    variables: Record<string, string>
+  ) => Promise<void>;
 }) {
   const known = !!thread.workerName;
   const [text, setText] = useState("");
@@ -1308,6 +1345,12 @@ function ConversationView({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  // WhatsApp free-text only delivers inside the 24h customer-care window. Out of
+  // window (or no window on record), the composer switches to template-only.
+  // SMS has no such restriction.
+  const inWindow = !!windowExpiry && new Date(windowExpiry).getTime() > Date.now();
+  const templateOnly = thread.channel === "WHATSAPP" && !inWindow;
 
   async function attachFromFile(file: File | null | undefined) {
     if (!file) return;
@@ -1361,7 +1404,14 @@ function ConversationView({
         ))}
       </div>
 
-      {/* Reply composer */}
+      {/* Composer — template-only when WhatsApp is outside its 24h window */}
+      {templateOnly ? (
+        <TemplateComposer
+          phone={thread.phone}
+          templates={templates}
+          onSend={onSendTemplate}
+        />
+      ) : (
       <div className="border-t border-border p-3">
         {error && <p className="mb-1 text-xs text-rose-600">{error}</p>}
         {media && <AttachmentPreview media={media} onRemove={() => setMedia(null)} />}
@@ -1413,6 +1463,117 @@ function ConversationView({
           </button>
         </div>
       </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Out-of-session WhatsApp composer. Free-text isn't deliverable outside the 24h
+ * window, so the admin picks an approved Meta template and fills its positional
+ * variables (pre-seeded with the template's samples) before sending.
+ */
+function TemplateComposer({
+  phone,
+  templates,
+  onSend,
+}: {
+  phone: string;
+  templates: MessageTemplate[];
+  onSend: (
+    phoneNumber: string,
+    templateKey: string,
+    variables: Record<string, string>
+  ) => Promise<void>;
+}) {
+  const [key, setKey] = useState(templates[0]?.key ?? "");
+  const active = templates.find((t) => t.key === key) ?? null;
+  // Per-variable values, seeded from the active template's samples.
+  const [values, setValues] = useState<Record<string, string>>({});
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Re-seed inputs whenever the selected template changes.
+  useEffect(() => {
+    if (!active) return;
+    const seed: Record<string, string> = {};
+    for (const v of active.variables) seed[v.position] = v.sample;
+    setValues(seed);
+    setError(null);
+  }, [active]);
+
+  async function send() {
+    if (!active) return;
+    setSending(true);
+    setError(null);
+    try {
+      await onSend(phone, active.key, values);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to send template");
+    } finally {
+      setSending(false);
+    }
+  }
+
+  return (
+    <div className="border-t border-border p-3">
+      <div className="mb-2 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-800">
+        <FileText size={14} className="mt-0.5 shrink-0" />
+        <span>
+          This WhatsApp chat is outside the 24-hour reply window, so only approved
+          templates can be sent. They reply to re-open free messaging.
+        </span>
+      </div>
+
+      {templates.length === 0 ? (
+        <p className="text-xs text-muted">No approved templates are configured.</p>
+      ) : (
+        <>
+          <label className="mb-1 block text-xs font-medium text-muted">Template</label>
+          <select
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
+            className="mb-3 w-full rounded-lg border border-border bg-white px-3 py-2 text-sm outline-none focus:border-brand"
+          >
+            {templates.map((t) => (
+              <option key={t.key} value={t.key}>
+                {t.displayName}
+              </option>
+            ))}
+          </select>
+
+          {active && (
+            <div className="mb-3 space-y-2">
+              {active.variables.map((v) => (
+                <div key={v.position}>
+                  <label className="mb-1 block text-[11px] font-medium text-muted">
+                    {v.label}
+                  </label>
+                  <input
+                    value={values[v.position] ?? ""}
+                    onChange={(e) =>
+                      setValues((prev) => ({ ...prev, [v.position]: e.target.value }))
+                    }
+                    placeholder={v.sample}
+                    className="w-full rounded-lg border border-border bg-white px-3 py-2 text-sm outline-none focus:border-brand"
+                  />
+                </div>
+              ))}
+            </div>
+          )}
+
+          {error && <p className="mb-2 text-xs text-rose-600">{error}</p>}
+
+          <button
+            onClick={send}
+            disabled={sending || !active}
+            className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+          >
+            {sending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
+            Send template
+          </button>
+        </>
+      )}
     </div>
   );
 }

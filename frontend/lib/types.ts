@@ -82,6 +82,22 @@ export interface IncomingMessage {
 export interface InboxResponse {
   unread: number;
   messages: IncomingMessage[];
+  // phone → ISO expiry for WhatsApp contacts still inside their 24h window.
+  windows?: Record<string, string>;
+}
+
+/** One editable positional variable in a WhatsApp template. */
+export interface TemplateVariable {
+  position: string; // "1".."N"
+  label: string;
+  sample: string;
+}
+
+/** An approved WhatsApp (Meta) template available for out-of-session sends. */
+export interface MessageTemplate {
+  key: string;
+  displayName: string;
+  variables: TemplateVariable[];
 }
 
 /** An outbound attachment uploaded/pasted by an admin (base64 data URL). */

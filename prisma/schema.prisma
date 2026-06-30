@@ -156,6 +156,24 @@ model IncomingMessage {
   @@map("incoming_messages")
 }
 
+// Tracks the WhatsApp 24h customer-care window per phone number. Keyed by phone
+// (not Worker) so it covers cold recruits who have no Worker record yet. An
+// inbound WhatsApp reply sets windowExpiresAt = now + 24h; while it's in the
+// future, the admin can free-text the contact, otherwise only approved
+// templates may be sent. Standalone table — no FKs — so deleting a worker
+// never disturbs it.
+model WhatsappContact {
+  id              String    @id @default(uuid())
+  phone           String    @unique
+  windowExpiresAt DateTime?
+  lastInboundAt   DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@index([windowExpiresAt])
+  @@map("whatsapp_contacts")
+}
+
 // A compliance document uploaded to a worker's profile vault (passport, RTW,
 // proof of address, etc.). The file is stored on disk; filePath is relative to
 // the server's uploads directory.

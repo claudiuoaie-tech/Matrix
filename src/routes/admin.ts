@@ -4,9 +4,13 @@ import path from "path";
 import { randomUUID } from "crypto";
 import type { ClientPool, RotaStatus, DocType, MessageChannel } from "@prisma/client";
 import { prisma } from "../lib/prisma";
-import { sendSms } from "../lib/twilio";
-import { dispatchMessage } from "../lib/messaging";
-import { whapiMediaAuthHeader, isWhapiMediaUrl } from "../lib/whapi";
+import { sendSms, sendMessage, sendWhatsAppTemplate } from "../lib/twilio";
+import {
+  getTemplate,
+  resolveContentSid,
+  templateCatalogForClient,
+  buildTemplatePreview,
+} from "../lib/templates";
 import { bus, emitRotaEvent, RotaEvent } from "../lib/events";
 import { revokeSessions } from "../lib/auth";
 import { requireAdmin } from "../lib/adminAuth";
@@ -905,9 +909,9 @@ adminRouter.post("/broadcast", async (req: Request, res: Response): Promise<void
     where: { id: { in: workerIds }, status: "ACTIVE", deletedAt: null },
   });
 
-  // Dispatch to every recipient on the chosen channel (SMS via Twilio,
-  // WhatsApp via Whapi).
-  await Promise.all(workers.map((w) => dispatchMessage(w.phone, messageBody, channel)));
+  // Dispatch to every recipient on the chosen channel (SMS or WhatsApp), both
+  // via Twilio.
+  await Promise.all(workers.map((w) => sendMessage(w.phone, messageBody, channel)));
 
   // Optionally seed PROPOSED allocations for a specific shift.
   let proposed = 0;
@@ -983,8 +987,21 @@ adminRouter.get("/messages", async (req: Request, res: Response): Promise<void> 
   // already-read, so they never inflate the badge.
   const unread = await prisma.incomingMessage.count({ where: { isRead: false } });
 
+  // Open WhatsApp windows: phone → ISO expiry, for contacts still inside their
+  // 24h customer-care window. The UI uses this to decide whether a WhatsApp
+  // thread allows free-text (in window) or only approved templates (expired).
+  const openContacts = await prisma.whatsappContact.findMany({
+    where: { windowExpiresAt: { gt: new Date() } },
+    select: { phone: true, windowExpiresAt: true },
+  });
+  const windows: Record<string, string> = {};
+  for (const c of openContacts) {
+    if (c.windowExpiresAt) windows[c.phone] = c.windowExpiresAt.toISOString();
+  }
+
   res.json({
     unread,
+    windows,
     messages: messages.map((m) => ({
       id: m.id,
       fromNumber: m.fromNumber,
@@ -1022,13 +1039,10 @@ adminRouter.get(
     const sid = process.env.TWILIO_ACCOUNT_SID;
     const token = process.env.TWILIO_AUTH_TOKEN;
     const headers: Record<string, string> = {};
-    // Authenticate the upstream fetch per host: Twilio MMS media needs Basic
-    // (SID:token); Whapi-hosted WhatsApp media needs the channel bearer token.
+    // Authenticate the upstream fetch for Twilio-hosted media. (On the cross-
+    // origin redirect to Twilio's CDN, fetch drops the auth header automatically.)
     if (sid && token && /(?:^|\.)twilio\.com\//.test(msg.mediaUrl)) {
       headers.Authorization = "Basic " + Buffer.from(`${sid}:${token}`).toString("base64");
-    } else if (isWhapiMediaUrl(msg.mediaUrl)) {
-      const bearer = whapiMediaAuthHeader();
-      if (bearer) headers.Authorization = bearer;
     }
 
     try {
@@ -1093,21 +1107,34 @@ async function sendOutboundMessage(
   channel: MessageChannel,
   mediaUrl: string | null
 ) {
-  // Dispatch on the chosen channel (SMS → Twilio, WhatsApp → Whapi). Both
-  // mock-log without creds and never throw on a bad number. A genuine rejection
-  // must fail loudly here — otherwise we'd log a phantom "sent" row and the
-  // admin UI would report success for a message that never left the provider.
-  const result = await dispatchMessage(phone, body, channel, mediaUrl ? [mediaUrl] : undefined);
+  // Send via Twilio (mock-logs without real creds; never throws on a bad number).
+  // A genuine rejection must fail loudly here — otherwise we'd log a phantom
+  // "sent" row and the admin UI would report success for a message that never
+  // left Twilio.
+  const result = await sendMessage(phone, body, channel, mediaUrl ? [mediaUrl] : undefined);
   if (!result.ok) {
     throw new HttpError(
       502,
-      `${channel} send failed${result.code ? ` (${result.code})` : ""}: ${
+      `${channel} send failed${result.code ? ` (Twilio ${result.code})` : ""}: ${
         result.message ?? "unknown error"
       }`
     );
   }
 
-  // Link to a worker by phone so the message threads under their name (if any).
+  return recordOutboundRow(phone, body, channel, mediaUrl);
+}
+
+/**
+ * Persist an already-sent OUTBOUND message to the inbox (read=true so it never
+ * inflates "unread"), link it to a Worker by phone when one matches, and emit
+ * the real-time event. Shared by free-form sends and template sends.
+ */
+async function recordOutboundRow(
+  phone: string,
+  body: string,
+  channel: MessageChannel,
+  mediaUrl: string | null
+) {
   const worker = await prisma.worker.findUnique({
     where: { phone },
     select: { id: true, name: true },
@@ -1213,6 +1240,68 @@ adminRouter.post(
       }
       throw err;
     }
+  }
+);
+
+/**
+ * GET /api/admin/templates — the approved WhatsApp template catalog for the
+ * out-of-session dropdown. Secret-free (Content SIDs stay server-side): just
+ * display name, key, and the editable positional variables.
+ */
+adminRouter.get("/templates", (_req: Request, res: Response): void => {
+  res.json({ templates: templateCatalogForClient() });
+});
+
+/**
+ * POST /api/admin/messages/send-template — send an approved Meta template via
+ * Twilio's Content API to ANY number, in or out of the 24h window. Body:
+ *   { phoneNumber: string, templateKey: string, variables: { "1": "...", ... } }
+ * Used for cold recruitment + out-of-session worker notifications.
+ */
+adminRouter.post(
+  "/messages/send-template",
+  async (req: Request, res: Response): Promise<void> => {
+    const phoneNumber = String(req.body?.phoneNumber ?? "").trim();
+    const templateKey = String(req.body?.templateKey ?? "").trim();
+    const rawVars = req.body?.variables;
+
+    if (!phoneNumber) {
+      res.status(400).json({ error: "phoneNumber is required." });
+      return;
+    }
+    const template = getTemplate(templateKey);
+    if (!template) {
+      res.status(400).json({ error: `Unknown template "${templateKey}".` });
+      return;
+    }
+
+    // Build the positional variable map from the template definition, falling
+    // back to each variable's sample when the admin left a field blank.
+    const values: Record<string, string> = {};
+    for (const v of template.variables) {
+      const provided =
+        rawVars && typeof rawVars === "object" ? (rawVars as Record<string, unknown>)[v.position] : undefined;
+      values[v.position] = String(provided ?? "").trim() || v.sample;
+    }
+
+    const result = await sendWhatsAppTemplate(phoneNumber, resolveContentSid(template), values);
+    if (!result.ok) {
+      res.status(502).json({
+        error: `Template send failed${result.code ? ` (Twilio ${result.code})` : ""}: ${
+          result.message ?? "unknown error"
+        }`,
+      });
+      return;
+    }
+
+    // Log a readable preview to the thread (we don't have the approved body text).
+    const message = await recordOutboundRow(
+      phoneNumber,
+      buildTemplatePreview(template, values),
+      "WHATSAPP",
+      null
+    );
+    res.status(201).json({ ok: true, message });
   }
 );
 

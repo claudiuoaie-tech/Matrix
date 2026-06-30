@@ -13,6 +13,7 @@ import type {
   ImportSummary,
   InboxResponse,
   IncomingMessage,
+  MessageTemplate,
   OutboundMedia,
   RecipientCandidate,
   RotaResponse,
@@ -308,6 +309,19 @@ export const admin = {
       method: "POST",
       admin: true,
       body: { phoneNumber, messageBody, channelType, media },
+    }),
+  // ---- WhatsApp templates (out-of-session) ----
+  messageTemplates: () =>
+    request<{ templates: MessageTemplate[] }>("/api/admin/templates", { admin: true }),
+  sendTemplate: (
+    phoneNumber: string,
+    templateKey: string,
+    variables: Record<string, string>
+  ) =>
+    request<{ ok: boolean; message: IncomingMessage }>("/api/admin/messages/send-template", {
+      method: "POST",
+      admin: true,
+      body: { phoneNumber, templateKey, variables },
     }),
   // Proxied URL for an inbound media attachment. Twilio media is private, so we
   // stream it via the backend; the admin key rides as a query param so it works

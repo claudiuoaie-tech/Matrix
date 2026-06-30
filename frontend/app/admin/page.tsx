@@ -15,7 +15,12 @@ import {
   Loader2,
 } from "lucide-react";
 import { auth, admin, ApiError } from "@/lib/api";
-import type { IncomingMessage, MessageChannel, OutboundMedia } from "@/lib/types";
+import type {
+  IncomingMessage,
+  MessageChannel,
+  MessageTemplate,
+  OutboundMedia,
+} from "@/lib/types";
 import { getAdminKey, setAdminKey, clearAdminKey } from "@/lib/adminSession";
 import { useRotaEvents } from "@/lib/useRotaEvents";
 import BoardGrid from "@/components/admin/BoardGrid";
@@ -158,6 +163,11 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
   const [unread, setUnread] = useState(0);
   const [loadingInbox, setLoadingInbox] = useState(true);
   const [marking, setMarking] = useState(false);
+  // Open WhatsApp 24h windows (phone → ISO expiry) and the approved template
+  // catalog — together they let the inbox switch a WhatsApp thread between
+  // free-text (in window) and template-only (out of window) composing.
+  const [windows, setWindows] = useState<Record<string, string>>({});
+  const [templates, setTemplates] = useState<MessageTemplate[]>([]);
 
   const loadInbox = useCallback(() => {
     admin
@@ -165,11 +175,20 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
       .then((r) => {
         setMessages(r.messages);
         setUnread(r.unread);
+        setWindows(r.windows ?? {});
       })
       .finally(() => setLoadingInbox(false));
   }, []);
 
   useEffect(loadInbox, [loadInbox]);
+
+  // Load the approved WhatsApp template catalog once.
+  useEffect(() => {
+    admin
+      .messageTemplates()
+      .then((r) => setTemplates(r.templates))
+      .catch(() => {});
+  }, []);
 
   // A new inbound text arrived over SSE — refresh the feed + unread count.
   useEffect(() => {
@@ -241,6 +260,16 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
     ) => {
       const channelType = channel === "WHATSAPP" ? "whatsapp" : "sms";
       const { message } = await admin.sendDirectMessage(phoneNumber, body, channelType, media);
+      setMessages((prev) => [message, ...prev]);
+    },
+    []
+  );
+
+  // Out-of-session WhatsApp via an approved template; prepend the preview row and
+  // reload so the freshly-opened window (if the contact replies) stays accurate.
+  const sendTemplateMessage = useCallback(
+    async (phoneNumber: string, templateKey: string, variables: Record<string, string>) => {
+      const { message } = await admin.sendTemplate(phoneNumber, templateKey, variables);
       setMessages((prev) => [message, ...prev]);
     },
     []
@@ -330,6 +359,9 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
           onClearRead={clearReadHistory}
           onBulkDelete={bulkDeleteMessages}
           onSendDirect={sendDirectMessage}
+          windows={windows}
+          templates={templates}
+          onSendTemplate={sendTemplateMessage}
         />
       )}
     </main>

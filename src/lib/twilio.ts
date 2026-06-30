@@ -11,19 +11,6 @@ export const TWILIO_FROM_NUMBER = process.env.TWILIO_FROM_NUMBER ?? "";
 export const TWILIO_WHATSAPP_FROM =
   process.env.TWILIO_WHATSAPP_FROM ?? TWILIO_FROM_NUMBER;
 
-/**
- * Approved WhatsApp template (Content API) used for BUSINESS-INITIATED sends —
- * i.e. messaging someone (a recruit, or a worker who hasn't replied in the last
- * 24h) outside the open conversation window. Meta silently drops free-form text
- * in that situation (Twilio accepts it, then it fails delivery with code 63016),
- * so a pre-approved template is the only way through.
- *
- * Set TWILIO_WHATSAPP_TEMPLATE_SID to a Content SID (HX…) whose body is a single
- * variable, e.g. "{{1}}". The operator's typed message is injected as {{1}}.
- * When unset, WhatsApp sends as free-form (works only inside the 24h window).
- */
-const WHATSAPP_TEMPLATE_SID = process.env.TWILIO_WHATSAPP_TEMPLATE_SID || "";
-
 /** Public base URL, for building the delivery status-callback webhook. */
 function publicBaseUrl(): string {
   return (process.env.PUBLIC_BASE_URL ?? process.env.RENDER_EXTERNAL_URL ?? "").replace(/\/$/, "");
@@ -185,32 +172,83 @@ export async function sendWhatsApp(
   const from = toWhatsApp(TWILIO_WHATSAPP_FROM);
   const dest = toWhatsApp(to);
   const statusCallback = statusCallbackUrl();
-  const usingTemplate = !!WHATSAPP_TEMPLATE_SID && !mediaUrls?.length;
 
+  // Free-form WhatsApp — only delivers inside the 24h customer-care window.
+  // Out-of-session (cold) sends must use sendWhatsAppTemplate() instead.
   try {
     const message = await twilioClient.messages.create({
       to: dest,
       from,
+      body,
       ...(statusCallback ? { statusCallback } : {}),
-      // Business-initiated (outside the 24h window): send the approved template
-      // with the operator's text as variable {{1}}. Otherwise free-form body.
-      ...(usingTemplate
-        ? { contentSid: WHATSAPP_TEMPLATE_SID, contentVariables: JSON.stringify({ "1": body }) }
-        : { body }),
       ...(mediaUrls?.length ? { mediaUrl: mediaUrls } : {}),
     });
-    // status here is the INITIAL state (queued/accepted) — final delivery is
-    // reported later at the status webhook. Logging the SID lets us correlate.
-    console.log(
-      `[whatsapp] accepted sid=${message.sid} status=${message.status}` +
-        `${usingTemplate ? " (template)" : ""} -> ${dest}`
-    );
+    console.log(`[whatsapp] accepted sid=${message.sid} status=${message.status} -> ${dest}`);
     return { ok: true };
   } catch (err) {
     // Surface the exact Twilio code (e.g. 63015 number not on WhatsApp, 63016
     // free-form outside 24h window, 21910 from/to channel mismatch) in the logs.
     const { code, message } = describeTwilioError(err);
     console.error("Twilio WhatsApp Send Error:", message, code, `(from=${from} to=${dest})`);
+    return { ok: false, code, message };
+  }
+}
+
+/**
+ * Sanitise a template variable value for Twilio's Content API.
+ *
+ * Twilio bug/validation 21656 rejects contentVariables containing a standard
+ * vertical apostrophe ('), so we swap it for the typographic right single
+ * quotation mark (’), which renders identically and passes validation.
+ */
+export function sanitizeTemplateValue(value: string): string {
+  return String(value).replace(/'/g, "’");
+}
+
+/**
+ * Send an out-of-session WhatsApp message using an approved Meta template via
+ * Twilio's Content API. `variables` maps positional indices ("1".."N") to the
+ * operator-supplied values, which are apostrophe-sanitised before sending.
+ *
+ * This is the ONLY way to reach a contact outside the 24h window (cold recruit,
+ * dormant worker). Mirrors sendWhatsApp's contract: never throws, returns a
+ * SendResult with the Twilio code on failure.
+ */
+export async function sendWhatsAppTemplate(
+  to: string,
+  contentSid: string,
+  variables: Record<string, string>
+): Promise<SendResult> {
+  const sanitized: Record<string, string> = {};
+  for (const [k, v] of Object.entries(variables)) sanitized[k] = sanitizeTemplateValue(v);
+
+  if (!twilioClient || !TWILIO_WHATSAPP_FROM) {
+    console.log(
+      `[whatsapp:template:mock] -> ${to}: ${contentSid} ${JSON.stringify(sanitized)}`
+    );
+    return { ok: true, mock: true };
+  }
+
+  const from = toWhatsApp(TWILIO_WHATSAPP_FROM);
+  const dest = toWhatsApp(to);
+  const statusCallback = statusCallbackUrl();
+
+  try {
+    const message = await twilioClient.messages.create({
+      to: dest,
+      from,
+      contentSid,
+      contentVariables: JSON.stringify(sanitized),
+      ...(statusCallback ? { statusCallback } : {}),
+    });
+    console.log(
+      `[whatsapp:template] accepted sid=${message.sid} status=${message.status} ` +
+        `content=${contentSid} -> ${dest}`
+    );
+    return { ok: true };
+  } catch (err) {
+    const { code, message } = describeTwilioError(err);
+    console.error("Twilio WhatsApp Template Send Error:", message, code, `(content=${contentSid} to=${dest})`);
     return { ok: false, code, message };
   }
 }
