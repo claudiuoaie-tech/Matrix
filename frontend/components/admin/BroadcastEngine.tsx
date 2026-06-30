@@ -25,6 +25,7 @@ import {
 import { admin } from "@/lib/api";
 import type {
   BoardCell,
+  BulkResultRow,
   ClientLite,
   IncomingMessage,
   MessageChannel,
@@ -32,6 +33,14 @@ import type {
   OutboundMedia,
   RecipientCandidate,
 } from "@/lib/types";
+
+/** Bulk-send handler: returns the per-recipient summary for the composer. */
+type SendBulkFn = (
+  recipients: string[],
+  body: string,
+  channel: MessageChannel,
+  media?: OutboundMedia
+) => Promise<{ sent: number; failed: number; results: BulkResultRow[] }>;
 import { SLOT_LABELS, formatDate } from "@/lib/ui";
 import { STATUS_STYLES, cellText } from "@/lib/boardUi";
 
@@ -57,7 +66,7 @@ export default function BroadcastEngine({
   onDelete,
   onClearRead,
   onBulkDelete,
-  onSendDirect,
+  onSendBulk,
   windows,
   templates,
   onSendTemplate,
@@ -76,12 +85,7 @@ export default function BroadcastEngine({
   onDelete: (id: string) => Promise<void>;
   onClearRead: () => Promise<void>;
   onBulkDelete: (ids: string[]) => Promise<void>;
-  onSendDirect: (
-    phoneNumber: string,
-    body: string,
-    channel: MessageChannel,
-    media?: OutboundMedia
-  ) => Promise<void>;
+  onSendBulk: SendBulkFn;
   windows: Record<string, string>;
   templates: MessageTemplate[];
   onSendTemplate: (
@@ -127,7 +131,7 @@ export default function BroadcastEngine({
           onDelete={onDelete}
           onClearRead={onClearRead}
           onBulkDelete={onBulkDelete}
-          onSendDirect={onSendDirect}
+          onSendBulk={onSendBulk}
           windows={windows}
           templates={templates}
           onSendTemplate={onSendTemplate}
@@ -715,7 +719,7 @@ function InboxPane({
   onDelete,
   onClearRead,
   onBulkDelete,
-  onSendDirect,
+  onSendBulk,
   windows,
   templates,
   onSendTemplate,
@@ -734,12 +738,7 @@ function InboxPane({
   onDelete: (id: string) => Promise<void>;
   onClearRead: () => Promise<void>;
   onBulkDelete: (ids: string[]) => Promise<void>;
-  onSendDirect: (
-    phoneNumber: string,
-    body: string,
-    channel: MessageChannel,
-    media?: OutboundMedia
-  ) => Promise<void>;
+  onSendBulk: SendBulkFn;
   windows: Record<string, string>;
   templates: MessageTemplate[];
   onSendTemplate: (
@@ -979,7 +978,7 @@ function InboxPane({
       </div>
 
       {composeOpen && (
-        <NewMessageModal onClose={() => setComposeOpen(false)} onSend={onSendDirect} />
+        <NewMessageModal onClose={() => setComposeOpen(false)} onSendBulk={onSendBulk} />
       )}
     </section>
   );
@@ -999,25 +998,196 @@ interface Thread {
  * Ad-hoc outbound composer (Phase 2, Feature 2). Sends to ANY number via
  * /api/admin/messages/send-direct — recipient need not be an existing worker.
  */
+/** A chosen recipient — a matched worker or a manually-typed number. */
+interface Recipient {
+  phone: string;
+  label: string;
+  isWorker: boolean;
+}
+
+const PHONE_RE = /^\+?[0-9\s()-]{6,}$/;
+
+/**
+ * Client-side E.164 normaliser mirroring the backend toE164() (UK default), used
+ * only to reconcile the per-number bulk results (which come back as E.164) with
+ * the locally-entered recipients when pruning successes after a partial failure.
+ */
+function normalizeToE164(raw: string): string {
+  let n = String(raw).trim().replace(/^whatsapp:/i, "").replace(/[\s()\-.]/g, "");
+  if (!n) return n;
+  if (n.startsWith("+")) return n;
+  if (n.startsWith("00")) return "+" + n.slice(2);
+  if (n.startsWith("0")) return "+44" + n.slice(1);
+  return "+" + n;
+}
+
+/**
+ * Multi-recipient "tag/badge" input. Typing searches active workers (matched on
+ * name or number); clicking one adds it as a tag. A valid bare number locked in
+ * with Enter/comma becomes a manual tag. Backspace on an empty field pops the
+ * last tag — like a native phone recipients field.
+ */
+function RecipientTagInput({
+  recipients,
+  setRecipients,
+  workers,
+  onError,
+}: {
+  recipients: Recipient[];
+  setRecipients: React.Dispatch<React.SetStateAction<Recipient[]>>;
+  workers: RecipientCandidate[];
+  onError: (msg: string | null) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [open, setOpen] = useState(false);
+  const boxRef = useRef<HTMLDivElement>(null);
+
+  const has = (phone: string) => recipients.some((r) => r.phone === phone);
+
+  const matches = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return [];
+    const digits = q.replace(/[\s()-]/g, "");
+    return workers
+      .filter((w) => !has(w.phone))
+      .filter(
+        (w) =>
+          w.name.toLowerCase().includes(q) ||
+          (digits.length >= 3 && w.phone.replace(/[\s()-]/g, "").includes(digits))
+      )
+      .slice(0, 6);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, workers, recipients]);
+
+  function addWorker(w: RecipientCandidate) {
+    if (!has(w.phone)) {
+      setRecipients((p) => [...p, { phone: w.phone, label: w.name, isWorker: true }]);
+    }
+    setQuery("");
+    setOpen(false);
+    onError(null);
+  }
+  function addManual(raw: string) {
+    const v = raw.trim().replace(/,+$/, "").trim();
+    if (!v) return;
+    if (!PHONE_RE.test(v)) {
+      onError(`"${v}" isn't a valid phone number.`);
+      return;
+    }
+    if (!has(v)) setRecipients((p) => [...p, { phone: v, label: v, isWorker: false }]);
+    setQuery("");
+    onError(null);
+  }
+  function commit() {
+    // Prefer a worker match unless the query is clearly a phone number.
+    if (matches.length && !/^\+?[0-9]/.test(query.trim())) addWorker(matches[0]);
+    else addManual(query);
+  }
+
+  // Close the suggestion dropdown on an outside click.
+  useEffect(() => {
+    if (!open) return;
+    function onDoc(e: MouseEvent) {
+      if (boxRef.current && !boxRef.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  return (
+    <div ref={boxRef} className="relative">
+      <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-border bg-white p-1.5 focus-within:border-brand">
+        {recipients.map((r) => (
+          <span
+            key={r.phone}
+            className="inline-flex items-center gap-1 rounded-full bg-indigo-50 py-1 pl-2 pr-1 text-xs font-medium text-brand"
+            title={r.phone}
+          >
+            <span className={r.isWorker ? "" : "font-mono"}>{r.label}</span>
+            <button
+              onClick={() => setRecipients((p) => p.filter((x) => x.phone !== r.phone))}
+              className="grid h-4 w-4 place-items-center rounded-full hover:bg-indigo-100"
+              title="Remove recipient"
+            >
+              <X size={11} />
+            </button>
+          </span>
+        ))}
+        <input
+          value={query}
+          autoFocus
+          onChange={(e) => {
+            setQuery(e.target.value);
+            setOpen(true);
+            onError(null);
+          }}
+          onFocus={() => setOpen(true)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === ",") {
+              e.preventDefault();
+              commit();
+            } else if (e.key === "Backspace" && !query && recipients.length) {
+              setRecipients((p) => p.slice(0, -1));
+            }
+          }}
+          inputMode="text"
+          placeholder={recipients.length ? "Add another…" : "Search a worker or type a number…"}
+          className="min-w-[9rem] flex-1 bg-transparent px-1 py-1 text-sm outline-none"
+        />
+      </div>
+      {open && matches.length > 0 && (
+        <div className="absolute left-0 right-0 z-30 mt-1 overflow-hidden rounded-xl border border-border bg-white shadow-lg">
+          {matches.map((w) => (
+            <button
+              key={w.id}
+              onClick={() => addWorker(w)}
+              className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-slate-50"
+            >
+              <span className="grid h-7 w-7 shrink-0 place-items-center rounded-full bg-slate-100 text-xs font-semibold text-slate-500">
+                {w.name.charAt(0).toUpperCase()}
+              </span>
+              <span className="min-w-0 flex-1 truncate">{w.name}</span>
+              <span className="shrink-0 font-mono text-[11px] text-muted">{w.phone}</span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Ad-hoc outbound composer — now multi-recipient. Sends to many numbers at once
+ * via /api/admin/messages/send-bulk; reports per-number failures in a summary.
+ */
 function NewMessageModal({
   onClose,
-  onSend,
+  onSendBulk,
 }: {
   onClose: () => void;
-  onSend: (
-    phoneNumber: string,
-    body: string,
-    channel: MessageChannel,
-    media?: OutboundMedia
-  ) => Promise<void>;
+  onSendBulk: SendBulkFn;
 }) {
-  const [phone, setPhone] = useState("");
+  const [recipients, setRecipients] = useState<Recipient[]>([]);
+  const [workers, setWorkers] = useState<RecipientCandidate[]>([]);
   const [channel, setChannel] = useState<MessageChannel>("SMS");
   const [body, setBody] = useState("");
   const [media, setMedia] = useState<OutboundMedia | null>(null);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [summary, setSummary] = useState<{
+    sent: number;
+    failed: number;
+    results: BulkResultRow[];
+  } | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  // Active workers for autocomplete (holiday filter only applies with a date).
+  useEffect(() => {
+    admin
+      .recipients()
+      .then(setWorkers)
+      .catch(() => {});
+  }, []);
 
   async function attachFromFile(file: File | null | undefined) {
     if (!file) return;
@@ -1029,32 +1199,42 @@ function NewMessageModal({
   }
 
   async function send() {
-    const p = phone.trim();
-    const b = body.trim();
-    if (!p) {
-      setError("Enter a phone number.");
+    if (recipients.length === 0) {
+      setError("Add at least one recipient.");
       return;
     }
+    const b = body.trim();
     if (!b && !media) {
       setError("Enter a message or attach a file.");
       return;
     }
-    // Light client-side guard; the number should ideally be E.164 (e.g. +447…).
-    if (!/^\+?[0-9\s()-]{6,}$/.test(p)) {
-      setError("Enter a valid phone number, ideally in full international form like +447700900123.");
-      return;
-    }
     setSending(true);
     setError(null);
+    setSummary(null);
     try {
-      await onSend(p, b, channel, media ?? undefined);
-      onClose();
+      const res = await onSendBulk(
+        recipients.map((r) => r.phone),
+        b,
+        channel,
+        media ?? undefined
+      );
+      if (res.failed === 0) {
+        onClose();
+        return;
+      }
+      // Partial failure: keep the modal open, show the summary, and narrow the
+      // recipients to just the failures so a retry doesn't double-send successes.
+      setSummary(res);
+      const failed = new Set(res.results.filter((r) => !r.ok).map((r) => r.phone));
+      setRecipients((prev) => prev.filter((r) => failed.has(normalizeToE164(r.phone))));
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to send message.");
     } finally {
       setSending(false);
     }
   }
+
+  const failedRows = summary?.results.filter((r) => !r.ok) ?? [];
 
   return (
     <div
@@ -1072,21 +1252,21 @@ function NewMessageModal({
           </button>
         </div>
 
-        <label className="mb-1 block text-xs font-medium text-muted">Phone number</label>
-        <input
-          value={phone}
-          onChange={(e) => setPhone(e.target.value)}
-          autoFocus
-          inputMode="tel"
-          placeholder="+447700900123"
-          className="mb-1 w-full rounded-lg border border-border bg-white px-3 py-2 text-sm outline-none focus:border-brand"
+        <label className="mb-1 block text-xs font-medium text-muted">
+          Recipients{recipients.length ? ` (${recipients.length})` : ""}
+        </label>
+        <RecipientTagInput
+          recipients={recipients}
+          setRecipients={setRecipients}
+          workers={workers}
+          onError={setError}
         />
-        <p className="mb-3 text-[11px] text-muted">
-          Include the country code (e.g. +44 for the UK). Any number works — it need not be a saved worker.
+        <p className="mb-3 mt-1 text-[11px] text-muted">
+          Search a worker by name, or type any number (with country code, e.g. +44) and press Enter.
         </p>
 
         <label className="mb-1 block text-xs font-medium text-muted">Send via</label>
-        <div className="mb-3 inline-flex rounded-lg border border-border p-0.5">
+        <div className="mb-1 inline-flex rounded-lg border border-border p-0.5">
           <button
             type="button"
             onClick={() => setChannel("SMS")}
@@ -1108,6 +1288,13 @@ function NewMessageModal({
             <MessageCircle size={15} /> WhatsApp
           </button>
         </div>
+        {channel === "WHATSAPP" && (
+          <p className="mb-3 text-[11px] text-amber-700">
+            WhatsApp free-text only reaches numbers that replied in the last 24h; others are
+            skipped — message them with an approved template from their conversation.
+          </p>
+        )}
+        {channel === "SMS" && <div className="mb-3" />}
 
         <label className="mb-1 block text-xs font-medium text-muted">Message</label>
         {media && <AttachmentPreview media={media} onRemove={() => setMedia(null)} />}
@@ -1127,6 +1314,21 @@ function NewMessageModal({
         />
 
         {error && <p className="mt-2 text-xs text-rose-600">{error}</p>}
+
+        {summary && (
+          <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs">
+            <p className="font-semibold text-amber-800">
+              Sent {summary.sent} successfully, {summary.failed} failed.
+            </p>
+            <ul className="mt-1 max-h-28 space-y-0.5 overflow-y-auto thin-scroll text-amber-700">
+              {failedRows.map((r) => (
+                <li key={r.phone}>
+                  <span className="font-mono">{r.phone}</span> — {r.error || `Twilio ${r.code}`}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         <input
           ref={fileRef}
@@ -1152,15 +1354,15 @@ function NewMessageModal({
               onClick={onClose}
               className="inline-flex items-center gap-1 rounded-lg border border-border px-3 py-2 text-sm font-medium text-muted hover:bg-slate-50"
             >
-              Cancel
+              {summary ? "Done" : "Cancel"}
             </button>
             <button
               onClick={send}
-              disabled={sending || !phone.trim() || (!body.trim() && !media)}
+              disabled={sending || recipients.length === 0 || (!body.trim() && !media)}
               className="inline-flex items-center gap-1.5 rounded-lg bg-brand px-4 py-2 text-sm font-medium text-white disabled:opacity-50"
             >
               {sending ? <Loader2 size={16} className="animate-spin" /> : <Send size={16} />}
-              Send
+              {summary ? "Retry failed" : `Send${recipients.length ? ` to ${recipients.length}` : ""}`}
             </button>
           </div>
         </div>

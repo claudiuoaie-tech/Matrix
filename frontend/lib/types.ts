@@ -100,6 +100,23 @@ export interface MessageTemplate {
   variables: TemplateVariable[];
 }
 
+/** Per-recipient outcome of a bulk dispatch. */
+export interface BulkResultRow {
+  phone: string;
+  ok: boolean;
+  code?: string | number;
+  error?: string;
+}
+
+/** Response from a bulk send: counts, per-number results, and logged rows. */
+export interface BulkSendResponse {
+  ok: boolean;
+  sent: number;
+  failed: number;
+  results: BulkResultRow[];
+  messages: IncomingMessage[];
+}
+
 /** An outbound attachment uploaded/pasted by an admin (base64 data URL). */
 export interface OutboundMedia {
   fileName: string;

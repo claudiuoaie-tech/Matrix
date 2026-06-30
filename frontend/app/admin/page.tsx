@@ -250,17 +250,14 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
     [loadInbox]
   );
 
-  // Ad-hoc outbound to any number; prepend the logged OUTBOUND row for feedback.
-  const sendDirectMessage = useCallback(
-    async (
-      phoneNumber: string,
-      body: string,
-      channel: MessageChannel,
-      media?: OutboundMedia
-    ) => {
+  // Ad-hoc outbound to one or many numbers; prepend the logged OUTBOUND rows and
+  // return the per-recipient summary so the composer can report partial failures.
+  const sendBulkMessage = useCallback(
+    async (recipients: string[], body: string, channel: MessageChannel, media?: OutboundMedia) => {
       const channelType = channel === "WHATSAPP" ? "whatsapp" : "sms";
-      const { message } = await admin.sendDirectMessage(phoneNumber, body, channelType, media);
-      setMessages((prev) => [message, ...prev]);
+      const res = await admin.sendBulkMessage(recipients, body, channelType, media);
+      if (res.messages.length) setMessages((prev) => [...res.messages, ...prev]);
+      return { sent: res.sent, failed: res.failed, results: res.results };
     },
     []
   );
@@ -358,7 +355,7 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
           onDelete={deleteMessage}
           onClearRead={clearReadHistory}
           onBulkDelete={bulkDeleteMessages}
-          onSendDirect={sendDirectMessage}
+          onSendBulk={sendBulkMessage}
           windows={windows}
           templates={templates}
           onSendTemplate={sendTemplateMessage}

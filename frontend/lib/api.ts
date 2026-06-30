@@ -7,6 +7,7 @@ import type {
   AvailabilityCell,
   BoardCell,
   BoardResponse,
+  BulkSendResponse,
   ClientLite,
   ClientPool,
   HolidayRequest,
@@ -309,6 +310,18 @@ export const admin = {
       method: "POST",
       admin: true,
       body: { phoneNumber, messageBody, channelType, media },
+    }),
+  // Fan one message out to many recipients (SMS, or WhatsApp gated by window).
+  sendBulkMessage: (
+    recipients: string[],
+    messageBody: string,
+    channelType: "sms" | "whatsapp",
+    media?: OutboundMedia
+  ) =>
+    request<BulkSendResponse>("/api/admin/messages/send-bulk", {
+      method: "POST",
+      admin: true,
+      body: { recipients, messageBody, channelType, media },
     }),
   // ---- WhatsApp templates (out-of-session) ----
   messageTemplates: () =>

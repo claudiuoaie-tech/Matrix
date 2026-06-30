@@ -4,7 +4,7 @@ import path from "path";
 import { randomUUID } from "crypto";
 import type { ClientPool, RotaStatus, DocType, MessageChannel } from "@prisma/client";
 import { prisma } from "../lib/prisma";
-import { sendSms, sendMessage, sendWhatsAppTemplate } from "../lib/twilio";
+import { sendSms, sendMessage, sendWhatsAppTemplate, toE164 } from "../lib/twilio";
 import {
   getTemplate,
   resolveContentSid,
@@ -1302,6 +1302,130 @@ adminRouter.post(
       null
     );
     res.status(201).json({ ok: true, message });
+  }
+);
+
+/**
+ * Run `fn` over `items` with a bounded concurrency `limit` (a worker pool, not a
+ * single Promise.all). Keeps results positionally aligned with the input. Lets a
+ * mass dispatch fire many Twilio requests concurrently without opening hundreds
+ * of sockets at once or blocking the event loop.
+ */
+async function mapThrottled<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const out = new Array<R>(items.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    while (true) {
+      const i = next++;
+      if (i >= items.length) return;
+      out[i] = await fn(items[i], i);
+    }
+  }
+  const pool = Math.max(1, Math.min(limit, items.length));
+  await Promise.all(Array.from({ length: pool }, () => worker()));
+  return out;
+}
+
+/** Per-recipient outcome of a bulk dispatch. */
+interface BulkResultRow {
+  phone: string;
+  ok: boolean;
+  code?: string | number;
+  error?: string;
+}
+
+/**
+ * POST /api/admin/messages/send-bulk — fan one message out to many recipients.
+ * Body: { recipients: string[], messageBody, channelType: "sms" | "whatsapp",
+ *         media? }. Recipients are normalised to E.164 and de-duplicated.
+ *
+ * SMS goes to everyone. WhatsApp free-text is gated per number by the 24h
+ * window: a recipient outside their window is failed (not sent) with a reason
+ * telling the operator to use an approved template instead. Returns a per-number
+ * result array + the logged OUTBOUND rows for the successes.
+ */
+adminRouter.post(
+  "/messages/send-bulk",
+  async (req: Request, res: Response): Promise<void> => {
+    const rawRecipients = Array.isArray(req.body?.recipients) ? req.body.recipients : [];
+    const messageBody = String(req.body?.messageBody ?? "").trim();
+    const channel = parseChannelType(req.body?.channelType);
+    const media = resolveOutboundMediaUrl(req.body?.media);
+    if (media.error) {
+      res.status(400).json({ error: media.error });
+      return;
+    }
+
+    // Normalise + de-dupe to E.164 (also the inbox thread key, so bulk sends
+    // thread with inbound replies).
+    const seen = new Set<string>();
+    const recipients: string[] = [];
+    for (const r of rawRecipients) {
+      const phone = toE164(String(r ?? ""));
+      if (phone && !seen.has(phone)) {
+        seen.add(phone);
+        recipients.push(phone);
+      }
+    }
+    if (recipients.length === 0) {
+      res.status(400).json({ error: "At least one recipient is required." });
+      return;
+    }
+    if (!messageBody && !media.url) {
+      res.status(400).json({ error: "A message or attachment is required." });
+      return;
+    }
+
+    // WhatsApp: which recipients are currently inside their 24h window?
+    let inWindow = new Set<string>();
+    if (channel === "WHATSAPP") {
+      const open = await prisma.whatsappContact.findMany({
+        where: { phone: { in: recipients }, windowExpiresAt: { gt: new Date() } },
+        select: { phone: true },
+      });
+      inWindow = new Set(open.map((c) => c.phone));
+    }
+
+    const messagesOut: Awaited<ReturnType<typeof recordOutboundRow>>[] = [];
+    const results = await mapThrottled<string, BulkResultRow>(recipients, 8, async (phone) => {
+      try {
+        // Block free-text WhatsApp outside the window — enforce template routing.
+        if (channel === "WHATSAPP" && !inWindow.has(phone)) {
+          return {
+            phone,
+            ok: false,
+            error: "Outside the 24-hour window — send an approved template instead.",
+          };
+        }
+        const send = await sendMessage(
+          phone,
+          messageBody,
+          channel,
+          media.url ? [media.url] : undefined
+        );
+        if (!send.ok) {
+          return { phone, ok: false, code: send.code, error: send.message };
+        }
+        const row = await recordOutboundRow(phone, messageBody, channel, media.url ?? null);
+        messagesOut.push(row);
+        return { phone, ok: true };
+      } catch (err) {
+        return { phone, ok: false, error: err instanceof Error ? err.message : "Send failed" };
+      }
+    });
+
+    const sent = results.filter((r) => r.ok).length;
+    res.status(201).json({
+      ok: true,
+      sent,
+      failed: results.length - sent,
+      results,
+      messages: messagesOut,
+    });
   }
 );
 
