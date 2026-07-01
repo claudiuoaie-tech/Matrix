@@ -29,6 +29,9 @@ import {
   CheckCheck,
   ChevronLeft,
   ChevronRight,
+  BellRing,
+  Sparkles,
+  UserPlus,
 } from "lucide-react";
 import { admin, CellInput } from "@/lib/api";
 import type {
@@ -36,6 +39,7 @@ import type {
   BoardCell,
   BoardWorker,
   ClientLite,
+  ReplacementCandidate,
   RotaEvent,
   RotaStatus,
   ShiftTemplate,
@@ -621,6 +625,59 @@ export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }
     loadBoard();
   }
 
+  // ---- Bulk "Nudge All Pending" ---------------------------------------------
+  const [nudgingAll, setNudgingAll] = useState(false);
+  async function nudgeAllPending() {
+    if (!board) return;
+    const today = todayKey();
+    // Scan the currently visible board view for pending (SCHEDULED, unconfirmed)
+    // slots dated today or later.
+    const slots: { workerId: string; date: string }[] = [];
+    for (const w of displayWorkers) {
+      for (const d of visibleDays) {
+        if (d < today) continue;
+        const cell = w.cells[d];
+        if (cell && cell.status === "SCHEDULED" && !cell.confirmed) {
+          slots.push({ workerId: w.id, date: d });
+        }
+      }
+    }
+    if (slots.length === 0) {
+      flashMsg("No pending shifts to nudge in this view");
+      return;
+    }
+    setNudgingAll(true);
+    try {
+      const res = await admin.nudgeAllPending(slots);
+      flashMsg(
+        `Nudged ${res.nudged} pending worker${res.nudged === 1 ? "" : "s"}${
+          res.failed ? ` · ${res.failed} failed` : ""
+        }`
+      );
+    } catch (err) {
+      flashMsg(err instanceof Error ? err.message : "Bulk nudge failed");
+    } finally {
+      setNudgingAll(false);
+    }
+  }
+
+  // ---- Smart Replacement Suggestions panel ----------------------------------
+  // Opened for a re-opened (rejected / empty) slot; suggests the top workers to
+  // slot in, and assigning one fires the primary allocation text automatically.
+  const [replaceFor, setReplaceFor] = useState<{
+    date: string;
+    excludeWorkerId?: string;
+  } | null>(null);
+
+  async function assignReplacement(workerId: string, date: string) {
+    // Schedule the chosen worker on the slot's day — this reuses the standard
+    // cell-set path, which fires the primary allocation message on the worker's
+    // preferred channel.
+    await applyCell(workerId, date, { status: "SCHEDULED", clientId: clientId || null });
+    setReplaceFor(null);
+    flashMsg("Replacement assigned — allocation text sent");
+  }
+
   // ---- Drag-and-drop shift moves (Phase 3) ----------------------------------
   // Native HTML5 DnD: a SCHEDULED cell is draggable; any blank / AVAILABLE cell
   // is a drop target. Disabled while Quick-Match / Bulk / Paste modes are on, so
@@ -1059,6 +1116,20 @@ export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }
           className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-600 shadow-sm transition-all duration-200 hover:bg-indigo-50/50 hover:text-indigo-600 disabled:opacity-50"
         >
           <Sliders size={15} /> Shift patterns
+        </button>
+
+        <button
+          onClick={nudgeAllPending}
+          disabled={nudgingAll || !board}
+          title="Send a confirmation reminder to every pending (unconfirmed) worker in this view"
+          className="inline-flex items-center gap-1.5 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-700 shadow-sm transition-all duration-200 hover:bg-amber-100 disabled:opacity-50"
+        >
+          {nudgingAll ? (
+            <Loader2 size={15} className="animate-spin" />
+          ) : (
+            <BellRing size={15} />
+          )}
+          Nudge all pending
         </button>
 
         {/* Skills filter */}
@@ -1677,6 +1748,20 @@ export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }
             setCancelTarget(editor);
             setEditor(null);
           }}
+          onFindReplacement={() => {
+            setReplaceFor({ date: editor.date, excludeWorkerId: editor.workerId });
+            setEditor(null);
+          }}
+        />
+      )}
+
+      {replaceFor && (
+        <ReplacementsPanel
+          date={replaceFor.date}
+          clientId={clientId}
+          excludeWorkerId={replaceFor.excludeWorkerId}
+          onAssign={(workerId) => assignReplacement(workerId, replaceFor.date)}
+          onClose={() => setReplaceFor(null)}
         />
       )}
 
@@ -2479,6 +2564,171 @@ function QuickSmsTray({
 // Cell editor popover
 // ---------------------------------------------------------------------------
 
+/**
+ * Smart Replacement Suggestions — a side panel that scores the best workers to
+ * fill a re-opened slot (skills match + availability + reliability). Clicking a
+ * name assigns them and fires the primary allocation text.
+ */
+function ReplacementsPanel({
+  date,
+  clientId,
+  excludeWorkerId,
+  onAssign,
+  onClose,
+}: {
+  date: string;
+  clientId: string;
+  excludeWorkerId?: string;
+  onAssign: (workerId: string) => Promise<void> | void;
+  onClose: () => void;
+}) {
+  const [loading, setLoading] = useState(true);
+  const [candidates, setCandidates] = useState<ReplacementCandidate[]>([]);
+  const [clientName, setClientName] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [assigning, setAssigning] = useState<string | null>(null);
+
+  useEffect(() => {
+    let live = true;
+    setLoading(true);
+    setError(null);
+    admin
+      .replacements({ date, clientId: clientId || undefined, excludeWorkerId })
+      .then((r) => {
+        if (!live) return;
+        setCandidates(r.candidates);
+        setClientName(r.client);
+      })
+      .catch((e) => {
+        if (live) setError(e instanceof Error ? e.message : "Could not load suggestions");
+      })
+      .finally(() => {
+        if (live) setLoading(false);
+      });
+    return () => {
+      live = false;
+    };
+  }, [date, clientId, excludeWorkerId]);
+
+  async function assign(workerId: string) {
+    setAssigning(workerId);
+    try {
+      await onAssign(workerId);
+    } finally {
+      setAssigning(null);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-[70] flex justify-end bg-black/30" onClick={onClose}>
+      <div
+        className="flex h-full w-full max-w-sm flex-col border-l border-slate-200 bg-white shadow-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+          <div>
+            <h3 className="flex items-center gap-1.5 text-sm font-semibold text-slate-800">
+              <Sparkles size={15} className="text-indigo-500" /> Suggested Replacements
+            </h3>
+            <p className="text-xs text-slate-400">
+              {longDayLabel(date)}
+              {clientName ? ` · ${clientName}` : ""}
+            </p>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-700">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="thin-scroll flex-1 overflow-y-auto p-3">
+          {loading ? (
+            <div className="grid place-items-center py-16">
+              <Loader2 className="animate-spin text-slate-300" />
+            </div>
+          ) : error ? (
+            <p className="rounded-lg bg-rose-50 px-3 py-2 text-sm text-rose-600">{error}</p>
+          ) : candidates.length === 0 ? (
+            <p className="px-2 py-10 text-center text-sm text-slate-400">
+              No available replacements found for this day.
+            </p>
+          ) : (
+            <ul className="space-y-2">
+              {candidates.map((c, i) => (
+                <li
+                  key={c.id}
+                  className="rounded-xl border border-slate-200 p-3 transition-colors hover:border-indigo-200 hover:bg-indigo-50/40"
+                >
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <p className="flex items-center gap-1.5 text-sm font-semibold text-slate-800">
+                        {i === 0 && (
+                          <span className="rounded bg-indigo-100 px-1.5 py-0.5 text-[9px] font-bold uppercase text-indigo-700">
+                            Best
+                          </span>
+                        )}
+                        {c.name}
+                      </p>
+                      <p className="mt-0.5 font-mono text-[11px] text-slate-400">{c.phone}</p>
+                    </div>
+                    <span
+                      className="shrink-0 rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-bold text-slate-600"
+                      title="Match score"
+                    >
+                      {c.score} pts
+                    </span>
+                  </div>
+
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {c.available && (
+                      <span className="rounded-full bg-emerald-50 px-2 py-0.5 text-[10px] font-medium text-emerald-600">
+                        Available
+                      </span>
+                    )}
+                    <span
+                      className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                        c.lateCancellations === 0
+                          ? "bg-emerald-50 text-emerald-600"
+                          : "bg-amber-50 text-amber-700"
+                      }`}
+                    >
+                      {c.lateCancellations === 0
+                        ? "No cancellations"
+                        : `${c.lateCancellations} late cancel${
+                            c.lateCancellations === 1 ? "" : "s"
+                          }`}
+                    </span>
+                    {c.matchedSkills.map((s) => (
+                      <span
+                        key={s}
+                        className="rounded-full bg-indigo-50 px-2 py-0.5 text-[10px] font-medium text-indigo-600"
+                      >
+                        {s}
+                      </span>
+                    ))}
+                  </div>
+
+                  <button
+                    onClick={() => assign(c.id)}
+                    disabled={!!assigning}
+                    className="mt-2.5 inline-flex w-full items-center justify-center gap-1.5 rounded-lg bg-brand px-3 py-2 text-xs font-semibold text-white hover:opacity-90 disabled:opacity-50"
+                  >
+                    {assigning === c.id ? (
+                      <Loader2 size={14} className="animate-spin" />
+                    ) : (
+                      <UserPlus size={14} />
+                    )}
+                    Assign &amp; notify
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function CellEditor({
   target,
   templates,
@@ -2490,6 +2740,7 @@ function CellEditor({
   onCopy,
   onPaste,
   onCancelShift,
+  onFindReplacement,
 }: {
   target: EditorTarget;
   templates: ShiftTemplate[];
@@ -2506,7 +2757,12 @@ function CellEditor({
   onCopy: () => void;
   onPaste: (silent: boolean) => void;
   onCancelShift: () => void;
+  onFindReplacement: () => void;
 }) {
+  // A re-opened slot (rejected dropout, or a free/blank cell) can be filled from
+  // the smart Suggested Replacements panel.
+  const canReplace =
+    !target.cell || target.cell.status === "REJECTED" || target.cell.status === "AVAILABLE";
   const [time, setTime] = useState(target.cell?.startTime ?? "");
   const [name, setName] = useState(target.cell?.label ?? "");
   const [silent, setSilent] = useState(false);
@@ -2558,6 +2814,15 @@ function CellEditor({
           <X size={16} />
         </button>
       </div>
+
+      {canReplace && (
+        <button
+          onClick={onFindReplacement}
+          className="mb-3 inline-flex w-full items-center justify-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs font-semibold text-indigo-700 hover:bg-indigo-100"
+        >
+          <Sparkles size={14} /> Suggested replacements
+        </button>
+      )}
 
       <div className="mb-3">
         <label className="mb-1 block text-[11px] font-medium text-slate-500">

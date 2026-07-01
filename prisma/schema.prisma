@@ -154,9 +154,17 @@ model IncomingMessage {
   worker      Worker?          @relation(fields: [workerId], references: [id], onDelete: SetNull)
   receivedAt  DateTime         @default(now())
   isRead      Boolean          @default(false)
+  // Twilio message SID for OUTBOUND rows, so async delivery status callbacks can
+  // be matched back to this row. Null for inbound + mock-mode sends.
+  providerSid String?
+  // Latest delivery state for OUTBOUND rows, driven by the Twilio status callback:
+  // "sent" | "delivered" | "read" | "failed". Null until the first callback (or
+  // for inbound rows). Renders the WhatsApp-style delivery ticks in the chat UI.
+  deliveryStatus String?
 
   @@index([receivedAt])
   @@index([workerId])
+  @@index([providerSid])
   @@map("incoming_messages")
 }
 

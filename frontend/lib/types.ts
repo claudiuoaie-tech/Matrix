@@ -70,6 +70,11 @@ export type MessageChannel = "SMS" | "WHATSAPP";
 
 export type MessageDirection = "INBOUND" | "OUTBOUND";
 
+// Delivery state for an OUTBOUND message, driven by Twilio status callbacks —
+// renders the WhatsApp-style ticks (sent → single, delivered → double, read →
+// double blue). null = not yet reported / mock send.
+export type DeliveryStatus = "sent" | "delivered" | "read" | "failed";
+
 export interface IncomingMessage {
   id: string;
   fromNumber: string;
@@ -80,6 +85,38 @@ export interface IncomingMessage {
   receivedAt: string;
   isRead: boolean;
   workerName: string | null;
+  deliveryStatus?: DeliveryStatus | null;
+}
+
+/** A card in the anti-no-show Alert Center (a late cancellation dropout). */
+export interface CancellationAlert {
+  workerId: string;
+  workerName: string;
+  phone: string;
+  clientName: string | null;
+  date: string; // YYYY-MM-DD
+  dateLabel: string; // DD/MM/YYYY
+  startTime: string | null;
+  at: string; // ISO timestamp of the cancellation
+}
+
+/** A suggested replacement worker for a re-opened slot. */
+export interface ReplacementCandidate {
+  id: string;
+  name: string;
+  phone: string;
+  skills: string[];
+  matchedSkills: string[];
+  available: boolean;
+  lateCancellations: number;
+  score: number;
+}
+
+export interface ReplacementsResponse {
+  date: string;
+  client: string | null;
+  requiredSkills: string[];
+  candidates: ReplacementCandidate[];
 }
 
 export interface InboxResponse {
@@ -265,6 +302,8 @@ export interface RotaEvent {
     | "availability.updated"
     | "holiday.created"
     | "board.updated"
-    | "message.received";
+    | "message.received"
+    | "message.status"
+    | "shift.cancelled";
   payload: Record<string, unknown>;
 }

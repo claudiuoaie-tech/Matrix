@@ -18,6 +18,7 @@ import type {
   MessageTemplate,
   OutboundMedia,
   RecipientCandidate,
+  ReplacementsResponse,
   RotaResponse,
   RotaStatus,
   ScheduleEntry,
@@ -424,6 +425,23 @@ export const admin = {
       admin: true,
       body: { workerId, date },
     }),
+  // Bulk-nudge every pending slot in the active board view (preferred channel).
+  nudgeAllPending: (slots: { workerId: string; date: string }[]) =>
+    request<{
+      ok: boolean;
+      nudged: number;
+      failed: number;
+      results: { workerId: string; date: string; ok: boolean; error?: string }[];
+    }>("/api/admin/board/nudge-all", { method: "POST", admin: true, body: { slots } }),
+  // Smart replacement suggestions for a re-opened slot.
+  replacements: (params: { date: string; clientId?: string; excludeWorkerId?: string }) => {
+    const q = new URLSearchParams({ date: params.date });
+    if (params.clientId) q.set("clientId", params.clientId);
+    if (params.excludeWorkerId) q.set("excludeWorkerId", params.excludeWorkerId);
+    return request<ReplacementsResponse>(`/api/admin/board/replacements?${q.toString()}`, {
+      admin: true,
+    });
+  },
 
   // ---- Shift templates ----
   templates: (clientId: string) =>

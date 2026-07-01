@@ -139,15 +139,13 @@ async function hasOpenWhatsappWindow(phone: string): Promise<boolean> {
  *                     fall back to the approved "Shift Confirmation" Meta template
  *                     via the Content API (so an out-of-session send never fails).
  */
-async function dispatchAllocation(
+async function dispatchShiftMessage(
   worker: { name: string; phone: string; preferredChannel: MessageChannel },
+  body: string,
   startTime: string | null,
   date: Date,
   clientName: string
 ): Promise<void> {
-  const firstName = splitName(worker.name).firstName;
-  const body = allocationSmsBody(firstName, startTime, date, clientName);
-
   if (worker.preferredChannel !== "WHATSAPP") {
     await sendSms(worker.phone, body);
     return;
@@ -176,6 +174,33 @@ async function dispatchAllocation(
 
   // No template configured — best-effort free-text WhatsApp rather than nothing.
   await sendWhatsApp(worker.phone, body);
+}
+
+/** Dispatch the primary shift-allocation message on the worker's preferred channel. */
+async function dispatchAllocation(
+  worker: { name: string; phone: string; preferredChannel: MessageChannel },
+  startTime: string | null,
+  date: Date,
+  clientName: string
+): Promise<void> {
+  const body = allocationSmsBody(splitName(worker.name).firstName, startTime, date, clientName);
+  await dispatchShiftMessage(worker, body, startTime, date, clientName);
+}
+
+/** The reminder ("nudge") copy for a pending shift — asks the worker to confirm. */
+function nudgeBody(
+  firstName: string,
+  startTime: string | null,
+  date: Date,
+  clientName: string
+): string {
+  const when = ymdFromUTC(date) === ymdFromUTC(new Date()) ? "today" : formatDateUk(date);
+  const time = startTime ? ` at ${startTime}` : "";
+  const at = clientName ? ` at ${clientName}` : "";
+  return (
+    `Hi ${firstName}, a reminder to confirm your shift${time}, ${when}${at}. ` +
+    `Please reply 1 to CONFIRM, 2 to REJECT. Thank you, Fast Rec`
+  );
 }
 
 /**
@@ -1133,6 +1158,7 @@ adminRouter.get("/messages", async (req: Request, res: Response): Promise<void> 
       receivedAt: m.receivedAt.toISOString(),
       isRead: m.isRead,
       workerName: m.worker?.name ?? null,
+      deliveryStatus: m.deliveryStatus,
     })),
   });
 });
@@ -1267,7 +1293,7 @@ async function sendOutboundMessage(
     );
   }
 
-  return recordOutboundRow(phone, body, channel, mediaUrl);
+  return recordOutboundRow(phone, body, channel, mediaUrl, result.sid ?? null);
 }
 
 /**
@@ -1279,7 +1305,8 @@ async function recordOutboundRow(
   phone: string,
   body: string,
   channel: MessageChannel,
-  mediaUrl: string | null
+  mediaUrl: string | null,
+  providerSid: string | null = null
 ) {
   const worker = await prisma.worker.findUnique({
     where: { phone },
@@ -1295,6 +1322,10 @@ async function recordOutboundRow(
       workerId: worker?.id ?? null,
       isRead: true,
       mediaUrl,
+      providerSid,
+      // A real accepted send starts at "sent" (single tick); the Twilio status
+      // callback later upgrades it to delivered/read. Mock sends stay null.
+      deliveryStatus: providerSid ? "sent" : null,
     },
   });
 
@@ -1308,6 +1339,7 @@ async function recordOutboundRow(
     receivedAt: msg.receivedAt.toISOString(),
     isRead: msg.isRead,
     workerName: worker?.name ?? null,
+    deliveryStatus: msg.deliveryStatus,
   };
 
   // Push to any other connected admin dashboards in real time.
@@ -1447,7 +1479,8 @@ adminRouter.post(
       phoneNumber,
       buildTemplatePreview(template, values),
       "WHATSAPP",
-      null
+      null,
+      result.sid ?? null
     );
     res.status(201).json({ ok: true, message });
   }
@@ -1562,7 +1595,8 @@ adminRouter.post(
             phone,
             buildTemplatePreview(template, values),
             "WHATSAPP",
-            null
+            null,
+            send.sid ?? null
           );
           messagesOut.push(row);
           return { phone, ok: true };
@@ -1620,7 +1654,7 @@ adminRouter.post(
         if (!send.ok) {
           return { phone, ok: false, code: send.code, error: send.message };
         }
-        const row = await recordOutboundRow(phone, messageBody, channel, media.url ?? null);
+        const row = await recordOutboundRow(phone, messageBody, channel, media.url ?? null, send.sid ?? null);
         messagesOut.push(row);
         return { phone, ok: true };
       } catch (err) {
@@ -2279,6 +2313,236 @@ adminRouter.post("/board/nudge", async (req: Request, res: Response): Promise<vo
   );
 
   res.json({ ok: true, nudged: worker.name });
+});
+
+/**
+ * POST /api/admin/board/nudge-all — bulk-nudge every still-pending slot in the
+ * currently active board view. Body: { slots: [{ workerId, date }] } (the visible
+ * cells the operator is looking at). Each slot is re-validated server-side as a
+ * SCHEDULED, not-yet-confirmed cell, then a reminder is dispatched on the
+ * worker's preferred channel through the bounded mapThrottled pool (8 at a time).
+ */
+adminRouter.post("/board/nudge-all", async (req: Request, res: Response): Promise<void> => {
+  const rawSlots = Array.isArray(req.body?.slots) ? req.body.slots : [];
+  // Normalise + de-dupe to unique worker/date pairs.
+  const seen = new Set<string>();
+  const slots: { workerId: string; date: string }[] = [];
+  for (const s of rawSlots) {
+    const workerId = String(s?.workerId ?? "").trim();
+    const date = String(s?.date ?? "").trim();
+    const key = `${workerId}|${date}`;
+    if (workerId && date && !seen.has(key)) {
+      seen.add(key);
+      slots.push({ workerId, date });
+    }
+  }
+  if (slots.length === 0) {
+    res.status(400).json({ error: "No pending slots supplied." });
+    return;
+  }
+
+  const results = await mapThrottled(slots, 8, async (slot) => {
+    try {
+      const date = dateOnlyUTC(slot.date);
+      const cell = await prisma.rotaCell.findUnique({
+        where: { workerId_date: { workerId: slot.workerId, date } },
+      });
+      // Only nudge genuinely pending shifts (skip anything already confirmed or
+      // no longer scheduled — the board the operator saw may be a little stale).
+      if (!cell || cell.status !== "SCHEDULED" || cell.confirmed) {
+        return { workerId: slot.workerId, date: slot.date, ok: false, error: "Not a pending shift" };
+      }
+      const worker = await prisma.worker.findUnique({
+        where: { id: slot.workerId },
+        select: { name: true, phone: true, preferredChannel: true },
+      });
+      if (!worker) {
+        return { workerId: slot.workerId, date: slot.date, ok: false, error: "Worker not found" };
+      }
+      let clientName = "";
+      if (cell.clientId) {
+        const c = await prisma.client.findUnique({
+          where: { id: cell.clientId },
+          select: { companyName: true },
+        });
+        clientName = c?.companyName ?? "";
+      }
+      const body = nudgeBody(splitName(worker.name).firstName, cell.startTime, date, clientName);
+      await dispatchShiftMessage(worker, body, cell.startTime, date, clientName);
+      return { workerId: slot.workerId, date: slot.date, ok: true };
+    } catch (err) {
+      return {
+        workerId: slot.workerId,
+        date: slot.date,
+        ok: false,
+        error: err instanceof Error ? err.message : "Nudge failed",
+      };
+    }
+  });
+
+  const nudged = results.filter((r) => r.ok).length;
+  res.json({ ok: true, nudged, failed: results.length - nudged, results });
+});
+
+/**
+ * GET /api/admin/board/replacements — smart replacement suggestions for a slot
+ * that just opened up (a rejection / cancellation). Query:
+ *   date=YYYY-MM-DD   (required)  the shift day
+ *   clientId=…        (optional)  restricts to the client's pool + names it
+ *   excludeWorkerId=… (optional)  the worker who dropped out (skill template)
+ *   requiredSkills=a,b(optional)  explicit client requirements (else the dropped
+ *                                 worker's skills are used as the profile to match)
+ *
+ * Returns the top 5 eligible workers scored on three weighted criteria:
+ *   1. Profile/skill match  (worker skills ∩ required skills)      × 3
+ *   2. Availability that day (explicitly AVAILABLE / free)          + 2
+ *   3. Reliability          (zero late cancellations preferred)     + 0..3
+ */
+adminRouter.get("/board/replacements", async (req: Request, res: Response): Promise<void> => {
+  const dateStr = typeof req.query.date === "string" ? req.query.date : "";
+  if (!dateStr) {
+    res.status(400).json({ error: "date is required (YYYY-MM-DD)" });
+    return;
+  }
+  const date = dateOnlyUTC(dateStr);
+  if (Number.isNaN(date.getTime())) {
+    res.status(400).json({ error: "date must be a valid YYYY-MM-DD" });
+    return;
+  }
+  const clientId = typeof req.query.clientId === "string" ? req.query.clientId : "";
+  const excludeWorkerId =
+    typeof req.query.excludeWorkerId === "string" ? req.query.excludeWorkerId : "";
+  const dow = (date.getUTCDay() + 6) % 7; // 0 = Monday, matching Availability
+
+  // Resolve the client (pool restricts the candidate set; name is for context).
+  let client: { id: string; companyName: string; pool: ClientPool } | null = null;
+  if (clientId) {
+    client = await prisma.client.findUnique({
+      where: { id: clientId },
+      select: { id: true, companyName: true, pool: true },
+    });
+  }
+
+  // Required skills: explicit query wins; else mirror the dropped worker's skills
+  // (find a like-for-like replacement).
+  let requiredSkills = String(req.query.requiredSkills ?? "")
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+  if (requiredSkills.length === 0 && excludeWorkerId) {
+    const dropped = await prisma.worker.findUnique({
+      where: { id: excludeWorkerId },
+      select: { skills: true },
+    });
+    requiredSkills = (dropped?.skills ?? []).map((s) => s.toLowerCase());
+  }
+
+  // Candidate pool: active, RTW-valid, in the client's pool, excluding the worker
+  // who dropped out.
+  const candidates = await prisma.worker.findMany({
+    where: {
+      status: "ACTIVE",
+      deletedAt: null,
+      ...(client ? { clientPool: client.pool } : {}),
+      ...(excludeWorkerId ? { id: { not: excludeWorkerId } } : {}),
+    },
+    select: { id: true, name: true, phone: true, skills: true, rtwExpiryDate: true, clientPool: true },
+  });
+  const eligible = candidates.filter((w) => !isRtwExpired(w.rtwExpiryDate));
+  const ids = eligible.map((w) => w.id);
+  if (ids.length === 0) {
+    res.json({ date: dateStr, client: client?.companyName ?? null, candidates: [] });
+    return;
+  }
+
+  // Batch the signals: this-day cells, holidays, weekday availability, and each
+  // worker's lifetime late-cancellation (REJECTED) count.
+  const [cells, holidays, availability, rejectedCounts] = await Promise.all([
+    prisma.rotaCell.findMany({
+      where: { workerId: { in: ids }, date },
+      select: { workerId: true, status: true },
+    }),
+    prisma.holidayRequest.findMany({
+      where: {
+        workerId: { in: ids },
+        status: { in: ["PENDING", "APPROVED"] },
+        startDate: { lte: date },
+        endDate: { gte: date },
+      },
+      select: { workerId: true },
+    }),
+    prisma.availability.findMany({
+      where: { workerId: { in: ids }, dayOfWeek: dow, available: true },
+      select: { workerId: true },
+    }),
+    prisma.rotaCell.groupBy({
+      by: ["workerId"],
+      where: { workerId: { in: ids }, status: "REJECTED" },
+      _count: { workerId: true },
+    }),
+  ]);
+
+  const cellByWorker = new Map(cells.map((c) => [c.workerId, c.status]));
+  const onHoliday = new Set(holidays.map((h) => h.workerId));
+  const availableWeekday = new Set(availability.map((a) => a.workerId));
+  const rejectedByWorker = new Map(rejectedCounts.map((r) => [r.workerId, r._count.workerId]));
+
+  // Statuses that make a worker unavailable to be slotted in on the day.
+  const BUSY: RotaStatus[] = [
+    "SCHEDULED",
+    "SICK",
+    "REST",
+    "HOLIDAY",
+    "NO_SHOW",
+    "CANCELLED",
+    "REJECTED",
+    "UNAVAILABLE",
+  ];
+
+  const scored = eligible
+    .filter((w) => !onHoliday.has(w.id))
+    .filter((w) => {
+      const status = cellByWorker.get(w.id);
+      return !status || !BUSY.includes(status); // blank or AVAILABLE only
+    })
+    .map((w) => {
+      const skillsLower = w.skills.map((s) => s.toLowerCase());
+      const matchedSkills = requiredSkills.filter((s) => skillsLower.includes(s));
+      const explicitlyAvailable =
+        cellByWorker.get(w.id) === "AVAILABLE" || availableWeekday.has(w.id);
+      const lateCancellations = rejectedByWorker.get(w.id) ?? 0;
+
+      const skillScore = matchedSkills.length * 3;
+      const availabilityScore = explicitlyAvailable ? 2 : 0;
+      const reliabilityScore =
+        lateCancellations === 0 ? 3 : lateCancellations === 1 ? 1 : 0;
+      const score = skillScore + availabilityScore + reliabilityScore;
+
+      return {
+        id: w.id,
+        name: w.name,
+        phone: w.phone,
+        skills: w.skills,
+        matchedSkills,
+        available: explicitlyAvailable,
+        lateCancellations,
+        score,
+      };
+    });
+
+  scored.sort(
+    (a, b) =>
+      b.score - a.score ||
+      a.lateCancellations - b.lateCancellations ||
+      a.name.localeCompare(b.name)
+  );
+
+  res.json({
+    date: dateStr,
+    client: client?.companyName ?? null,
+    requiredSkills,
+    candidates: scored.slice(0, 5),
+  });
 });
 
 // ----------------------------------------------------------------------------

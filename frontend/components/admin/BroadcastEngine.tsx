@@ -5,7 +5,9 @@ import {
   Loader2,
   Send,
   Users,
+  Check,
   CheckCheck,
+  AlertCircle,
   CalendarClock,
   Eraser,
   ArrowRight,
@@ -27,6 +29,7 @@ import type {
   BoardCell,
   BulkResultRow,
   ClientLite,
+  DeliveryStatus,
   IncomingMessage,
   MessageChannel,
   MessageTemplate,
@@ -765,7 +768,7 @@ function InboxPane({
   onSendBulkTemplate: SendBulkTemplateFn;
 }) {
   // All / Unread filter (operates on threads). "unread" = threads with unread.
-  const [filter, setFilter] = useState<"all" | "unread">("all");
+  const [filter, setFilter] = useState<"all" | "unread" | "cancellations" | "cold">("all");
   const [clearing, setClearing] = useState(false);
   // Multi-select deletion now selects whole conversations (by phone).
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -805,8 +808,22 @@ function InboxPane({
     return list;
   }, [messages]);
 
-  const visibleThreads =
-    filter === "unread" ? threads.filter((t) => t.unreadCount > 0) : threads;
+  const visibleThreads = useMemo(() => {
+    switch (filter) {
+      case "unread":
+        return threads.filter((t) => t.unreadCount > 0);
+      case "cancellations":
+        // Threads carrying a late-cancellation alert (tagged "⚠️ CANCELLATION").
+        return threads.filter((t) =>
+          t.messages.some((m) => m.messageBody?.startsWith("⚠️ CANCELLATION"))
+        );
+      case "cold":
+        // Cold recruits: numbers not linked to any registered worker.
+        return threads.filter((t) => !t.workerName);
+      default:
+        return threads;
+    }
+  }, [filter, threads]);
 
   // Drop selections for conversations that no longer exist.
   useEffect(() => {
@@ -922,12 +939,22 @@ function InboxPane({
           >
             <Plus size={14} /> New message
           </button>
-          <div className="inline-flex rounded-lg border border-border p-0.5">
+          <div className="inline-flex flex-wrap rounded-lg border border-border p-0.5">
             <FilterTab active={filter === "all"} onClick={() => setFilter("all")} label="All" />
             <FilterTab
               active={filter === "unread"}
               onClick={() => setFilter("unread")}
               label={`Unread${unread > 0 ? ` (${unread})` : ""}`}
+            />
+            <FilterTab
+              active={filter === "cancellations"}
+              onClick={() => setFilter("cancellations")}
+              label="Cancellations"
+            />
+            <FilterTab
+              active={filter === "cold"}
+              onClick={() => setFilter("cold")}
+              label="Cold Recruits"
             />
           </div>
           <button
@@ -986,7 +1013,11 @@ function InboxPane({
             <Inbox size={28} className="mx-auto mb-2 text-slate-300" />
             {filter === "unread"
               ? "No unread conversations."
-              : "No messages yet. Inbound texts appear here in real time."}
+              : filter === "cancellations"
+                ? "No late cancellations. Dropouts will surface here."
+                : filter === "cold"
+                  ? "No cold-recruit threads yet."
+                  : "No messages yet. Inbound texts appear here in real time."}
           </div>
         ) : (
           <ul className="divide-y divide-border">
@@ -1722,6 +1753,16 @@ function ConversationView({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
+  const feedRef = useRef<HTMLDivElement>(null);
+
+  // Auto-scroll the feed to the newest message: on open (thread change) and as new
+  // messages arrive, snap the container to the bottom so the latest texts are
+  // visible without manual scrolling.
+  const messageCount = thread.messages.length;
+  useEffect(() => {
+    const el = feedRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [thread.phone, messageCount]);
 
   // WhatsApp free-text only delivers inside the 24h customer-care window. Out of
   // window (or no window on record), the composer switches to template-only.
@@ -1775,7 +1816,10 @@ function ConversationView({
       </div>
 
       {/* Messages */}
-      <div className="flex-1 space-y-2 overflow-y-auto thin-scroll bg-slate-50/50 p-4">
+      <div
+        ref={feedRef}
+        className="flex-1 space-y-2 overflow-y-auto thin-scroll bg-slate-50/50 p-4"
+      >
         {thread.messages.map((m) => (
           <ChatBubble key={m.id} m={m} onDelete={onDelete} />
         ))}
@@ -1962,6 +2006,33 @@ function TemplateComposer({
   );
 }
 
+/**
+ * WhatsApp-style delivery ticks for an outbound message.
+ *  - sent      → single tick
+ *  - delivered → double ticks
+ *  - read      → double ticks, blue
+ *  - failed    → red alert icon
+ * On the brand-coloured bubble we use a light tick for sent/delivered and a
+ * bright sky tick for read (blue), preserving the count + colour semantics.
+ */
+function DeliveryTicks({ status }: { status?: DeliveryStatus | null }) {
+  if (!status) return null;
+  if (status === "failed") {
+    return <AlertCircle size={13} className="text-rose-300" aria-label="Failed to deliver" />;
+  }
+  if (status === "sent") {
+    return <Check size={13} className="text-white/70" aria-label="Sent" />;
+  }
+  const read = status === "read";
+  return (
+    <CheckCheck
+      size={13}
+      className={read ? "text-sky-300" : "text-white/70"}
+      aria-label={read ? "Read" : "Delivered"}
+    />
+  );
+}
+
 /** A single chat bubble — outbound right (brand), inbound left (white). */
 function ChatBubble({
   m,
@@ -2021,9 +2092,12 @@ function ChatBubble({
           </a>
         )}
         <span
-          className={`mt-1 block text-[10px] ${outbound ? "text-white/70" : "text-muted"}`}
+          className={`mt-1 flex items-center gap-1 text-[10px] ${
+            outbound ? "justify-end text-white/70" : "text-muted"
+          }`}
         >
           {relativeTime(m.receivedAt)}
+          {outbound && <DeliveryTicks status={m.deliveryStatus} />}
         </span>
         <button
           onClick={remove}

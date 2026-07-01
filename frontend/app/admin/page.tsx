@@ -16,6 +16,8 @@ import {
 } from "lucide-react";
 import { auth, admin, ApiError } from "@/lib/api";
 import type {
+  CancellationAlert,
+  DeliveryStatus,
   IncomingMessage,
   MessageChannel,
   MessageTemplate,
@@ -27,6 +29,30 @@ import BoardGrid from "@/components/admin/BoardGrid";
 import WorkersManager from "@/components/admin/WorkersManager";
 import ClientsManager from "@/components/admin/ClientsManager";
 import BroadcastEngine from "@/components/admin/BroadcastEngine";
+import AlertCenter from "@/components/admin/AlertCenter";
+
+/** Fire a browser desktop notification for a late cancellation (best-effort). */
+function notifyCancellation(a: CancellationAlert) {
+  if (typeof window === "undefined" || !("Notification" in window)) return;
+  const show = () => {
+    try {
+      new Notification("⚠️ Late cancellation", {
+        body: `${a.workerName} dropped ${a.clientName ? `${a.clientName} · ` : ""}${a.dateLabel}${
+          a.startTime ? ` ${a.startTime}` : ""
+        }. Slot re-opened.`,
+        tag: `cancel-${a.workerId}-${a.date}`,
+      });
+    } catch {
+      /* Notification construction can throw on some platforms — ignore. */
+    }
+  };
+  if (Notification.permission === "granted") show();
+  else if (Notification.permission !== "denied") {
+    Notification.requestPermission().then((p) => {
+      if (p === "granted") show();
+    });
+  }
+}
 
 type Tab = "rota" | "workers" | "clients" | "broadcast";
 type Gate = "checking" | "out" | "in";
@@ -194,6 +220,46 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
   useEffect(() => {
     if (lastEvent?.type === "message.received") loadInbox();
   }, [lastEvent, loadInbox]);
+
+  // Anti-no-show Alert Center: late-cancellation cards + delivery-tick updates.
+  const [alerts, setAlerts] = useState<CancellationAlert[]>([]);
+
+  // Ask for desktop-notification permission once, so the first late cancellation
+  // can pop a browser notification.
+  useEffect(() => {
+    if (typeof window !== "undefined" && "Notification" in window) {
+      if (Notification.permission === "default") {
+        Notification.requestPermission().catch(() => {});
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!lastEvent) return;
+    if (lastEvent.type === "message.status") {
+      // Advance the delivery ticks on the matching outbound row.
+      const p = lastEvent.payload as { id?: string; deliveryStatus?: DeliveryStatus };
+      if (p.id) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === p.id ? { ...m, deliveryStatus: p.deliveryStatus ?? m.deliveryStatus } : m
+          )
+        );
+      }
+    } else if (lastEvent.type === "shift.cancelled") {
+      // Push a high-visibility card + a desktop notification.
+      const a = lastEvent.payload as unknown as CancellationAlert;
+      if (a?.workerId) {
+        setAlerts((prev) => [a, ...prev].slice(0, 20));
+        notifyCancellation(a);
+      }
+    }
+  }, [lastEvent]);
+
+  const dismissAlert = useCallback((key: string) => {
+    setAlerts((prev) => prev.filter((a) => `${a.workerId}-${a.date}-${a.at}` !== key));
+  }, []);
+  const clearAlerts = useCallback(() => setAlerts([]), []);
 
   const markAll = useCallback(async () => {
     setMarking(true);
@@ -390,6 +456,8 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
           onSendBulkTemplate={sendBulkTemplateMessage}
         />
       )}
+
+      <AlertCenter alerts={alerts} onDismiss={dismissAlert} onClear={clearAlerts} />
     </main>
   );
 }

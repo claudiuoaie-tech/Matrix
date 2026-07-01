@@ -17,7 +17,13 @@ export type RotaEventType =
   | "availability.updated"
   | "holiday.created"
   | "board.updated"
-  | "message.received";
+  | "message.received"
+  // An outbound message's delivery status changed (Twilio callback): drives the
+  // WhatsApp-style delivery ticks in the chat UI.
+  | "message.status"
+  // A worker cancelled an already-CONFIRMED upcoming shift: feeds the high-
+  // visibility Alert Center (anti-no-show sidebar).
+  | "shift.cancelled";
 
 export interface RotaEvent {
   type: RotaEventType;

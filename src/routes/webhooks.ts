@@ -159,17 +159,26 @@ async function rejectPendingCell(cell: PendingCell): Promise<void> {
   });
 }
 
+/** A confirmed board cell, carrying the client + time we need for the alert. */
+type ConfirmedCell = {
+  id: string;
+  workerId: string;
+  date: Date;
+  startTime: string | null;
+  clientId: string | null;
+};
+
 /**
  * The worker's soonest upcoming shift that they had ALREADY confirmed (SCHEDULED
  * + confirmed, dated today or later). Used to catch a late cancellation — a
  * rejection that arrives after the worker locked the shift in.
  */
-async function findConfirmedUpcomingCell(workerId: string): Promise<PendingCell | null> {
+async function findConfirmedUpcomingCell(workerId: string): Promise<ConfirmedCell | null> {
   const today = dateOnlyUTC(ymdFromUTC(new Date()));
   return prisma.rotaCell.findFirst({
     where: { workerId, status: "SCHEDULED", confirmed: true, date: { gte: today } },
     orderBy: [{ date: "asc" }, { updatedAt: "desc" }],
-    select: { id: true, workerId: true, date: true },
+    select: { id: true, workerId: true, date: true, startTime: true, clientId: true },
   });
 }
 
@@ -177,33 +186,63 @@ async function findConfirmedUpcomingCell(workerId: string): Promise<PendingCell 
  * Process a LATE cancellation: a worker who had already confirmed an upcoming
  * shift now backs out. Move the cell into the REJECTED cartridge (reopening the
  * slot), push a real-time board update, raise a high-visibility "⚠️ CANCELLATION"
- * alert in the conversation thread (unread, so the Live Inbox badge fires), and
- * fan the event out to the internal webhook — so the team notices immediately
- * that a locked-in worker has dropped out.
+ * alert in the conversation thread (unread, so the Live Inbox badge fires), push
+ * a dedicated shift.cancelled event to the Alert Center sidebar, and fan the
+ * event out to the internal webhook — so the team notices immediately that a
+ * locked-in worker has dropped out.
  */
 async function cancelConfirmedCell(
-  cell: PendingCell,
+  cell: ConfirmedCell,
   worker: { id: string; name: string },
   fromNumber: string,
   channel: MessageChannel
 ): Promise<void> {
+  // Resolve the client name for the alert BEFORE we clear the cell.
+  let clientName: string | null = null;
+  if (cell.clientId) {
+    const c = await prisma.client.findUnique({
+      where: { id: cell.clientId },
+      select: { companyName: true },
+    });
+    clientName = c?.companyName ?? null;
+  }
+  const dateKey = ymdFromUTC(cell.date);
+  const dateLabel = formatDateUk(cell.date);
+  const timeLabel = cell.startTime ? ` at ${cell.startTime}` : "";
+  const atClient = clientName ? ` at ${clientName}` : "";
+
   await prisma.rotaCell.update({
     where: { id: cell.id },
     data: { status: "REJECTED", confirmed: false, startTime: null, endTime: null },
   });
   emitRotaEvent({
     type: "board.updated",
-    payload: { workerId: cell.workerId, date: ymdFromUTC(cell.date) },
+    payload: { workerId: cell.workerId, date: dateKey },
+  });
+
+  // High-visibility Alert Center card (anti-no-show sidebar) — everything a
+  // coordinator needs to react instantly.
+  emitRotaEvent({
+    type: "shift.cancelled",
+    payload: {
+      workerId: worker.id,
+      workerName: worker.name,
+      phone: fromNumber,
+      clientName,
+      date: dateKey,
+      dateLabel,
+      startTime: cell.startTime,
+      at: new Date().toISOString(),
+    },
   });
 
   // Tag the thread + drive the unread badge. Best-effort: a logging failure must
   // never block the reply to the worker.
-  const dateLabel = formatDateUk(cell.date);
   try {
     const alert = await prisma.incomingMessage.create({
       data: {
         fromNumber,
-        messageBody: `⚠️ CANCELLATION: ${worker.name} has cancelled a CONFIRMED shift on ${dateLabel}. The slot has been reopened.`,
+        messageBody: `⚠️ CANCELLATION: ${worker.name} has cancelled a CONFIRMED shift on ${dateLabel}${timeLabel}${atClient}. The slot has been reopened.`,
         channel,
         workerId: worker.id,
         // direction defaults INBOUND, isRead defaults false — deliberately left
@@ -221,6 +260,7 @@ async function cancelConfirmedCell(
         receivedAt: alert.receivedAt.toISOString(),
         isRead: alert.isRead,
         workerName: worker.name,
+        deliveryStatus: null,
       },
     });
   } catch (err) {
@@ -232,7 +272,9 @@ async function cancelConfirmedCell(
     workerId: worker.id,
     workerName: worker.name,
     phone: fromNumber,
-    date: ymdFromUTC(cell.date),
+    clientName,
+    date: dateKey,
+    startTime: cell.startTime,
   });
 }
 
@@ -382,20 +424,48 @@ webhooksRouter.post(
 );
 
 /**
+ * Map a raw Twilio/Meta status to the coarse delivery state the chat ticks use:
+ *   sent      → single grey tick  (accepted/queued/sent by our server)
+ *   delivered → double grey ticks (reached the handset)
+ *   read      → double blue ticks (WhatsApp read receipt)
+ *   failed    → error (undelivered / failed)
+ * Returns null for statuses we don't surface (e.g. "queued" — still "sent").
+ */
+function mapDeliveryStatus(raw: string): "sent" | "delivered" | "read" | "failed" | null {
+  switch (raw.toLowerCase()) {
+    case "sent":
+    case "queued":
+    case "accepted":
+    case "sending":
+      return "sent";
+    case "delivered":
+      return "delivered";
+    case "read":
+      return "read";
+    case "undelivered":
+    case "failed":
+      return "failed";
+    default:
+      return null;
+  }
+}
+
+/** Rank so a later callback can't regress the tick (read > delivered > sent). */
+const DELIVERY_RANK: Record<string, number> = { sent: 1, delivered: 2, read: 3, failed: 2 };
+
+/**
  * POST /api/webhooks/twilio/status
  *
  * Delivery status callback. messages.create only reports the INITIAL state
- * (queued/accepted); the real outcome — delivered, or undelivered/failed with
- * an ErrorCode — lands here moments later. This is what reveals WhatsApp 63016
- * ("free-form message outside the 24h window — use a template"), the usual
- * reason a business-initiated message is accepted but never received.
- *
- * Log-only: no DB writes, no state change, so it stays a pure diagnostic.
+ * (queued/accepted); the real outcome — delivered / read, or undelivered/failed
+ * with an ErrorCode — lands here moments later. We match the SID back to the
+ * outbound row, advance its deliveryStatus (never regressing), and push a
+ * message.status event so the chat ticks update live.
  */
 webhooksRouter.post(
   "/twilio/status",
   validateTwilioSignature,
-  (req: Request, res: Response): void => {
+  async (req: Request, res: Response): Promise<void> => {
     const b = req.body ?? {};
     const status = String(b.MessageStatus ?? b.SmsStatus ?? "");
     const sid = String(b.MessageSid ?? b.SmsSid ?? "");
@@ -409,6 +479,36 @@ webhooksRouter.post(
     } else {
       console.log(line);
     }
+
+    // Reflect the status onto the matching outbound row (best-effort — a missing
+    // row or DB hiccup must never fail the callback; Twilio would just retry).
+    const mapped = mapDeliveryStatus(status);
+    if (sid && mapped) {
+      try {
+        const row = await prisma.incomingMessage.findFirst({
+          where: { providerSid: sid },
+          select: { id: true, fromNumber: true, deliveryStatus: true },
+        });
+        if (row) {
+          const current = row.deliveryStatus ? DELIVERY_RANK[row.deliveryStatus] ?? 0 : 0;
+          // Only advance forwards (a stray "sent" after "read" must not regress),
+          // but always let a "failed" land.
+          if (mapped === "failed" || DELIVERY_RANK[mapped] > current) {
+            await prisma.incomingMessage.update({
+              where: { id: row.id },
+              data: { deliveryStatus: mapped },
+            });
+            emitRotaEvent({
+              type: "message.status",
+              payload: { id: row.id, fromNumber: row.fromNumber, deliveryStatus: mapped },
+            });
+          }
+        }
+      } catch (err) {
+        console.error("[delivery] failed to update message status:", err);
+      }
+    }
+
     res.sendStatus(204);
   }
 );

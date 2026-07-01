@@ -76,6 +76,9 @@ export interface SendResult {
   mock?: boolean;
   code?: string | number;
   message?: string;
+  // Twilio message SID on a successful real send — stored on the outbound row so
+  // async delivery-status callbacks can be matched back to it.
+  sid?: string;
 }
 
 /** Pull Twilio's numeric error code + message off a thrown error, defensively. */
@@ -137,7 +140,7 @@ export async function sendSms(
       ...(mediaUrls?.length ? { mediaUrl: mediaUrls } : {}),
     });
     console.log(`[sms] accepted sid=${message.sid} status=${message.status} -> ${toE164(to)}`);
-    return { ok: true };
+    return { ok: true, sid: message.sid };
   } catch (err) {
     const { code, message } = describeTwilioError(err);
     console.error("Twilio SMS Send Error:", message, code);
@@ -184,7 +187,7 @@ export async function sendWhatsApp(
       ...(mediaUrls?.length ? { mediaUrl: mediaUrls } : {}),
     });
     console.log(`[whatsapp] accepted sid=${message.sid} status=${message.status} -> ${dest}`);
-    return { ok: true };
+    return { ok: true, sid: message.sid };
   } catch (err) {
     // Surface the exact Twilio code (e.g. 63015 number not on WhatsApp, 63016
     // free-form outside 24h window, 21910 from/to channel mismatch) in the logs.
@@ -245,7 +248,7 @@ export async function sendWhatsAppTemplate(
       `[whatsapp:template] accepted sid=${message.sid} status=${message.status} ` +
         `content=${contentSid} -> ${dest}`
     );
-    return { ok: true };
+    return { ok: true, sid: message.sid };
   } catch (err) {
     const { code, message } = describeTwilioError(err);
     console.error("Twilio WhatsApp Template Send Error:", message, code, `(content=${contentSid} to=${dest})`);
