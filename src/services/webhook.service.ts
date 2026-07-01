@@ -10,7 +10,8 @@ const OUTBOUND_WEBHOOK_URL = process.env.OUTBOUND_WEBHOOK_URL ?? "";
 export type WebhookEvent =
   | "no_show.logged"
   | "worker.rtw_expired"
-  | "holiday.requested";
+  | "holiday.requested"
+  | "shift.cancelled";
 
 const configured = OUTBOUND_WEBHOOK_URL.trim().length > 0;
 

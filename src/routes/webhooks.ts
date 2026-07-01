@@ -5,7 +5,8 @@ import { prisma } from "../lib/prisma";
 import { validateTwilioSignature } from "../middleware/validateTwilioSignature";
 import { acceptAllocation, declineAllocation } from "../lib/allocations";
 import { emitRotaEvent } from "../lib/events";
-import { ymdFromUTC, dateOnlyUTC } from "../lib/board";
+import { ymdFromUTC, dateOnlyUTC, formatDateUk } from "../lib/board";
+import { fireWebhook } from "../services/webhook.service";
 
 export const webhooksRouter = Router();
 
@@ -109,6 +110,9 @@ const CONFIRM_REPLY = "Thank you. Your shift has been locked in and confirmed.";
 /** Reply sent when a worker rejects. */
 const REJECT_REPLY =
   "Thank you for letting us know. We have removed you from this shift request.";
+/** Reply sent when a worker cancels a shift they had already confirmed. */
+const CANCELLATION_REPLY =
+  "We have processed your cancellation and removed you from this shift. Thank you for letting us know.";
 
 /** The pending board cell we can action from an inbound reply. */
 type PendingCell = { id: string; workerId: string; date: Date };
@@ -152,6 +156,83 @@ async function rejectPendingCell(cell: PendingCell): Promise<void> {
   emitRotaEvent({
     type: "board.updated",
     payload: { workerId: cell.workerId, date: ymdFromUTC(cell.date) },
+  });
+}
+
+/**
+ * The worker's soonest upcoming shift that they had ALREADY confirmed (SCHEDULED
+ * + confirmed, dated today or later). Used to catch a late cancellation — a
+ * rejection that arrives after the worker locked the shift in.
+ */
+async function findConfirmedUpcomingCell(workerId: string): Promise<PendingCell | null> {
+  const today = dateOnlyUTC(ymdFromUTC(new Date()));
+  return prisma.rotaCell.findFirst({
+    where: { workerId, status: "SCHEDULED", confirmed: true, date: { gte: today } },
+    orderBy: [{ date: "asc" }, { updatedAt: "desc" }],
+    select: { id: true, workerId: true, date: true },
+  });
+}
+
+/**
+ * Process a LATE cancellation: a worker who had already confirmed an upcoming
+ * shift now backs out. Move the cell into the REJECTED cartridge (reopening the
+ * slot), push a real-time board update, raise a high-visibility "⚠️ CANCELLATION"
+ * alert in the conversation thread (unread, so the Live Inbox badge fires), and
+ * fan the event out to the internal webhook — so the team notices immediately
+ * that a locked-in worker has dropped out.
+ */
+async function cancelConfirmedCell(
+  cell: PendingCell,
+  worker: { id: string; name: string },
+  fromNumber: string,
+  channel: MessageChannel
+): Promise<void> {
+  await prisma.rotaCell.update({
+    where: { id: cell.id },
+    data: { status: "REJECTED", confirmed: false, startTime: null, endTime: null },
+  });
+  emitRotaEvent({
+    type: "board.updated",
+    payload: { workerId: cell.workerId, date: ymdFromUTC(cell.date) },
+  });
+
+  // Tag the thread + drive the unread badge. Best-effort: a logging failure must
+  // never block the reply to the worker.
+  const dateLabel = formatDateUk(cell.date);
+  try {
+    const alert = await prisma.incomingMessage.create({
+      data: {
+        fromNumber,
+        messageBody: `⚠️ CANCELLATION: ${worker.name} has cancelled a CONFIRMED shift on ${dateLabel}. The slot has been reopened.`,
+        channel,
+        workerId: worker.id,
+        // direction defaults INBOUND, isRead defaults false — deliberately left
+        // unread so it lights up the Live Inbox unread badge.
+      },
+    });
+    emitRotaEvent({
+      type: "message.received",
+      payload: {
+        id: alert.id,
+        fromNumber: alert.fromNumber,
+        messageBody: alert.messageBody,
+        channel: alert.channel,
+        mediaUrl: alert.mediaUrl,
+        receivedAt: alert.receivedAt.toISOString(),
+        isRead: alert.isRead,
+        workerName: worker.name,
+      },
+    });
+  } catch (err) {
+    console.error("[cancellation alert] failed to tag thread:", err);
+  }
+
+  // Internal admin / HR system alert (fire-and-forget).
+  void fireWebhook("shift.cancelled", {
+    workerId: worker.id,
+    workerName: worker.name,
+    phone: fromNumber,
+    date: ymdFromUTC(cell.date),
   });
 }
 
@@ -270,7 +351,25 @@ webhooksRouter.post(
         }
       }
 
-      // 5. No actionable pending shift, or an ambiguous / casual reply ("thanks",
+      // 5. Late cancellation: a rejection with no pending shift left, but the
+      //    worker had already CONFIRMED an upcoming shift. Drop it into the
+      //    REJECTED cartridge, alert admins (a locked-in worker has pulled out),
+      //    and acknowledge the cancellation.
+      if (!allocation && decline && !accept) {
+        const confirmedCell = await findConfirmedUpcomingCell(worker.id);
+        if (confirmedCell) {
+          await cancelConfirmedCell(
+            confirmedCell,
+            { id: worker.id, name: worker.name },
+            from,
+            channel
+          );
+          replyTwiml(res, CANCELLATION_REPLY);
+          return;
+        }
+      }
+
+      // 6. No actionable pending shift, or an ambiguous / casual reply ("thanks",
       //    a question, a keyword with nothing to confirm): the message is already
       //    logged to the thread above — stay silent so an admin can reply by hand.
       replyEmpty(res);
