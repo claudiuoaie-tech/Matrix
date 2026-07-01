@@ -40,10 +40,10 @@ import type {
   BoardWorker,
   ClientLite,
   ReplacementCandidate,
-  RotaEvent,
   RotaStatus,
   ShiftTemplate,
 } from "@/lib/types";
+import { useRotaEventListener, type Subscribe } from "@/lib/useRotaEvents";
 import {
   STATUS_STYLES,
   ADMIN_STATUSES,
@@ -245,7 +245,7 @@ function compareCells(a: BoardCell | null, b: BoardCell | null, dir: "asc" | "de
   return dir === "asc" ? r : -r;
 }
 
-export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }) {
+export default function BoardGrid({ subscribe }: { subscribe: Subscribe }) {
   const [clients, setClients] = useState<ClientLite[]>([]);
   const [clientId, setClientId] = useState<string>("");
   const [board, setBoard] = useState<BoardResponse | null>(null);
@@ -375,16 +375,15 @@ export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }
     setFooterFilter(null);
   }, [clientId, loadBoard]);
 
-  useEffect(() => {
-    if (!lastEvent) return;
-
-    // A late cancellation emits board.updated + shift.cancelled synchronously, so
-    // React coalesces them and this effect only sees the LAST one (shift.cancelled).
-    // Handle it explicitly: optimistically flip the exact cell out of the active
-    // (green/confirmed) schedule into REJECTED for instant feedback, then reconcile
-    // with a fresh fetch — so the grid matches the alert card without a reload.
-    if (lastEvent.type === "shift.cancelled") {
-      const p = lastEvent.payload as { workerId?: string; date?: string };
+  // Durable per-event subscription: every event is delivered individually, so a
+  // late cancellation's board.updated can never be coalesced away behind the
+  // shift.cancelled that follows it synchronously.
+  useRotaEventListener(subscribe, (event) => {
+    if (event.type === "shift.cancelled") {
+      // Optimistically flip the exact cell out of the active (green/confirmed)
+      // schedule into REJECTED for instant feedback, then reconcile with a fresh
+      // fetch — so the grid matches the alert card without a reload.
+      const p = event.payload as { workerId?: string; date?: string };
       if (p.workerId && p.date) {
         const workerId = p.workerId;
         const date = p.date;
@@ -410,10 +409,10 @@ export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }
       return;
     }
 
-    if (lastEvent.type === "board.updated" || lastEvent.type === "allocation.updated") {
+    if (event.type === "board.updated" || event.type === "allocation.updated") {
       loadBoard();
     }
-  }, [lastEvent, loadBoard]);
+  });
 
   // End any in-progress drag-selection when the mouse is released anywhere.
   useEffect(() => {

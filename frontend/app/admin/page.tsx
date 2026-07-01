@@ -24,7 +24,7 @@ import type {
   OutboundMedia,
 } from "@/lib/types";
 import { getAdminKey, setAdminKey, clearAdminKey } from "@/lib/adminSession";
-import { useRotaEvents } from "@/lib/useRotaEvents";
+import { useRotaEvents, useRotaEventListener } from "@/lib/useRotaEvents";
 import BoardGrid from "@/components/admin/BoardGrid";
 import WorkersManager from "@/components/admin/WorkersManager";
 import ClientsManager from "@/components/admin/ClientsManager";
@@ -179,7 +179,7 @@ function AdminLogin({ onSuccess }: { onSuccess: () => void }) {
 
 function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
   const [tab, setTab] = useState<Tab>("rota");
-  const { connected, lastEvent } = useRotaEvents();
+  const { connected, subscribe } = useRotaEvents();
 
   // Live Inbox state is owned here (not inside BroadcastEngine) so the unread
   // badge on the Broadcast Engine tab updates in real time even while the
@@ -216,11 +216,6 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
       .catch(() => {});
   }, []);
 
-  // A new inbound text arrived over SSE — refresh the feed + unread count.
-  useEffect(() => {
-    if (lastEvent?.type === "message.received") loadInbox();
-  }, [lastEvent, loadInbox]);
-
   // Anti-no-show Alert Center: late-cancellation cards + delivery-tick updates.
   const [alerts, setAlerts] = useState<CancellationAlert[]>([]);
 
@@ -234,27 +229,37 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
     }
   }, []);
 
-  useEffect(() => {
-    if (!lastEvent) return;
-    if (lastEvent.type === "message.status") {
-      // Advance the delivery ticks on the matching outbound row.
-      const p = lastEvent.payload as { id?: string; deliveryStatus?: DeliveryStatus };
-      if (p.id) {
-        setMessages((prev) =>
-          prev.map((m) =>
-            m.id === p.id ? { ...m, deliveryStatus: p.deliveryStatus ?? m.deliveryStatus } : m
-          )
-        );
+  // One durable subscriber for every inbox / delivery / cancellation event. Every
+  // event is delivered individually, so back-to-back events can't coalesce.
+  useRotaEventListener(subscribe, (event) => {
+    switch (event.type) {
+      case "message.received":
+        // A new inbound text (or a cancellation alert row) — refresh feed + badge.
+        loadInbox();
+        break;
+      case "message.status": {
+        // Advance the delivery ticks on the matching outbound row.
+        const p = event.payload as { id?: string; deliveryStatus?: DeliveryStatus };
+        if (p.id) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === p.id ? { ...m, deliveryStatus: p.deliveryStatus ?? m.deliveryStatus } : m
+            )
+          );
+        }
+        break;
       }
-    } else if (lastEvent.type === "shift.cancelled") {
-      // Push a high-visibility card + a desktop notification.
-      const a = lastEvent.payload as unknown as CancellationAlert;
-      if (a?.workerId) {
-        setAlerts((prev) => [a, ...prev].slice(0, 20));
-        notifyCancellation(a);
+      case "shift.cancelled": {
+        // Push a high-visibility card + a desktop notification.
+        const a = event.payload as unknown as CancellationAlert;
+        if (a?.workerId) {
+          setAlerts((prev) => [a, ...prev].slice(0, 20));
+          notifyCancellation(a);
+        }
+        break;
       }
     }
-  }, [lastEvent]);
+  });
 
   const dismissAlert = useCallback((key: string) => {
     setAlerts((prev) => prev.filter((a) => `${a.workerId}-${a.date}-${a.at}` !== key));
@@ -434,7 +439,7 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
         ))}
       </nav>
 
-      {tab === "rota" && <BoardGrid lastEvent={lastEvent} />}
+      {tab === "rota" && <BoardGrid subscribe={subscribe} />}
       {tab === "workers" && <WorkersManager />}
       {tab === "clients" && <ClientsManager />}
       {tab === "broadcast" && (
