@@ -124,6 +124,8 @@ export async function declineAllocation(
     if (!shift || !alloc) return null;
 
     const date = boardDate(shift.date);
+    // Preserve the shift's start/end time on the rejected cartridge so a
+    // replacement inherits the exact time for their allocation text.
     await tx.rotaCell.upsert({
       where: { workerId_date: { workerId: alloc.workerId, date } },
       create: {
@@ -131,15 +133,15 @@ export async function declineAllocation(
         date,
         status: "REJECTED",
         confirmed: false,
-        startTime: null,
-        endTime: null,
+        startTime: shift.startTime,
+        endTime: shift.endTime,
         clientId: shift.clientId,
       },
       update: {
         status: "REJECTED",
         confirmed: false,
-        startTime: null,
-        endTime: null,
+        startTime: shift.startTime,
+        endTime: shift.endTime,
         clientId: shift.clientId,
       },
     });

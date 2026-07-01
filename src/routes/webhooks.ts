@@ -149,9 +149,11 @@ async function confirmPendingCell(cell: PendingCell): Promise<void> {
  * REJECTED cartridge (freeing the slot) and push a real-time board update.
  */
 async function rejectPendingCell(cell: PendingCell): Promise<void> {
+  // Keep the original start/end time on the cell so the rejected cartridge still
+  // carries the shift time — a replacement inherits it for their allocation text.
   await prisma.rotaCell.update({
     where: { id: cell.id },
-    data: { status: "REJECTED", confirmed: false, startTime: null, endTime: null },
+    data: { status: "REJECTED", confirmed: false },
   });
   emitRotaEvent({
     type: "board.updated",
@@ -211,9 +213,11 @@ async function cancelConfirmedCell(
   const timeLabel = cell.startTime ? ` at ${cell.startTime}` : "";
   const atClient = clientName ? ` at ${clientName}` : "";
 
+  // Keep the shift time on the cell (we captured startTime above for the alert),
+  // so the rejected cartridge retains it for a replacement's allocation text.
   await prisma.rotaCell.update({
     where: { id: cell.id },
-    data: { status: "REJECTED", confirmed: false, startTime: null, endTime: null },
+    data: { status: "REJECTED", confirmed: false },
   });
   emitRotaEvent({
     type: "board.updated",

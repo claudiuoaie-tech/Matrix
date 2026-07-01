@@ -667,13 +667,24 @@ export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }
   const [replaceFor, setReplaceFor] = useState<{
     date: string;
     excludeWorkerId?: string;
+    // The original shift time, preserved on the rejected cartridge, so the
+    // replacement's allocation text carries the exact time (not the placeholder).
+    startTime?: string | null;
+    endTime?: string | null;
   } | null>(null);
 
-  async function assignReplacement(workerId: string, date: string) {
+  async function assignReplacement(workerId: string) {
+    if (!replaceFor) return;
     // Schedule the chosen worker on the slot's day — this reuses the standard
     // cell-set path, which fires the primary allocation message on the worker's
-    // preferred channel.
-    await applyCell(workerId, date, { status: "SCHEDULED", clientId: clientId || null });
+    // preferred channel. The preserved start/end time flows straight into the
+    // allocation copy ("at 08:00" instead of "your scheduled time").
+    await applyCell(workerId, replaceFor.date, {
+      status: "SCHEDULED",
+      startTime: replaceFor.startTime ?? null,
+      endTime: replaceFor.endTime ?? null,
+      clientId: clientId || null,
+    });
     setReplaceFor(null);
     flashMsg("Replacement assigned — allocation text sent");
   }
@@ -1749,7 +1760,12 @@ export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }
             setEditor(null);
           }}
           onFindReplacement={() => {
-            setReplaceFor({ date: editor.date, excludeWorkerId: editor.workerId });
+            setReplaceFor({
+              date: editor.date,
+              excludeWorkerId: editor.workerId,
+              startTime: editor.cell?.startTime ?? null,
+              endTime: editor.cell?.endTime ?? null,
+            });
             setEditor(null);
           }}
         />
@@ -1760,7 +1776,8 @@ export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }
           date={replaceFor.date}
           clientId={clientId}
           excludeWorkerId={replaceFor.excludeWorkerId}
-          onAssign={(workerId) => assignReplacement(workerId, replaceFor.date)}
+          startTime={replaceFor.startTime ?? null}
+          onAssign={assignReplacement}
           onClose={() => setReplaceFor(null)}
         />
       )}
@@ -2573,12 +2590,14 @@ function ReplacementsPanel({
   date,
   clientId,
   excludeWorkerId,
+  startTime,
   onAssign,
   onClose,
 }: {
   date: string;
   clientId: string;
   excludeWorkerId?: string;
+  startTime?: string | null;
   onAssign: (workerId: string) => Promise<void> | void;
   onClose: () => void;
 }) {
@@ -2632,6 +2651,7 @@ function ReplacementsPanel({
             </h3>
             <p className="text-xs text-slate-400">
               {longDayLabel(date)}
+              {startTime ? ` · ${startTime}` : ""}
               {clientName ? ` · ${clientName}` : ""}
             </p>
           </div>
