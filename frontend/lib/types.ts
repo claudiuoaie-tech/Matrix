@@ -185,6 +185,18 @@ export interface HolidayRequest {
   note: string | null;
 }
 
+/** A holiday request as seen by the admin console (worker name + reason + created). */
+export interface AdminHolidayRequest {
+  id: string;
+  workerId: string;
+  workerName: string | null;
+  startDate: string; // YYYY-MM-DD
+  endDate: string; // YYYY-MM-DD
+  status: HolidayStatus;
+  reason: string | null;
+  createdAt: string; // ISO
+}
+
 export interface RotaAllocation {
   id: string;
   state: AllocationState;
@@ -300,10 +312,11 @@ export interface RotaEvent {
     | "worker.updated"
     | "broadcast.sent"
     | "availability.updated"
-    | "holiday.created"
     | "board.updated"
     | "message.received"
     | "message.status"
-    | "shift.cancelled";
+    | "shift.cancelled"
+    | "holiday.requested"
+    | "holiday.updated";
   payload: Record<string, unknown>;
 }

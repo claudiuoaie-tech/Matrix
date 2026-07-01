@@ -7,6 +7,7 @@ import {
   Users,
   Building2,
   Radio,
+  Plane,
   ArrowLeft,
   Wifi,
   WifiOff,
@@ -30,6 +31,7 @@ import WorkersManager from "@/components/admin/WorkersManager";
 import ClientsManager from "@/components/admin/ClientsManager";
 import BroadcastEngine from "@/components/admin/BroadcastEngine";
 import AlertCenter from "@/components/admin/AlertCenter";
+import HolidaysManager from "@/components/admin/HolidaysManager";
 
 /** Fire a browser desktop notification for a late cancellation (best-effort). */
 function notifyCancellation(a: CancellationAlert) {
@@ -54,7 +56,7 @@ function notifyCancellation(a: CancellationAlert) {
   }
 }
 
-type Tab = "rota" | "workers" | "clients" | "broadcast";
+type Tab = "rota" | "workers" | "clients" | "broadcast" | "holidays";
 type Gate = "checking" | "out" | "in";
 
 export default function AdminPage() {
@@ -219,6 +221,17 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
   // Anti-no-show Alert Center: late-cancellation cards + delivery-tick updates.
   const [alerts, setAlerts] = useState<CancellationAlert[]>([]);
 
+  // Pending holiday-request count, for the Holidays tab badge. Refetched on any
+  // holiday event so the badge stays live from any tab.
+  const [holidayPending, setHolidayPending] = useState(0);
+  const loadHolidayPending = useCallback(() => {
+    admin
+      .adminHolidays("PENDING")
+      .then((r) => setHolidayPending(r.length))
+      .catch(() => {});
+  }, []);
+  useEffect(loadHolidayPending, [loadHolidayPending]);
+
   // Ask for desktop-notification permission once, so the first late cancellation
   // can pop a browser notification.
   useEffect(() => {
@@ -258,6 +271,11 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
         }
         break;
       }
+      case "holiday.requested":
+      case "holiday.updated":
+        // Keep the Holidays tab badge live regardless of the current tab.
+        loadHolidayPending();
+        break;
     }
   });
 
@@ -380,6 +398,7 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
     { key: "workers", label: "Workers", icon: <Users size={16} /> },
     { key: "clients", label: "Clients", icon: <Building2 size={16} /> },
     { key: "broadcast", label: "Broadcast Engine", icon: <Radio size={16} />, badge: unread },
+    { key: "holidays", label: "Holidays", icon: <Plane size={16} />, badge: holidayPending },
   ];
 
   return (
@@ -461,6 +480,7 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
           onSendBulkTemplate={sendBulkTemplateMessage}
         />
       )}
+      {tab === "holidays" && <HolidaysManager subscribe={subscribe} />}
 
       <AlertCenter alerts={alerts} onDismiss={dismissAlert} onClear={clearAlerts} />
     </main>

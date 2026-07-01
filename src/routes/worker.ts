@@ -275,8 +275,16 @@ workerRouter.post("/holidays", async (req: Request, res: Response): Promise<void
   });
 
   emitRotaEvent({
-    type: "holiday.created",
-    payload: { workerId: req.worker!.id, holidayId: holiday.id },
+    type: "holiday.requested",
+    payload: {
+      holidayId: holiday.id,
+      workerId: req.worker!.id,
+      workerName: req.worker!.name,
+      startDate: ymdFromUTC(new Date(holiday.startDate)),
+      endDate: ymdFromUTC(new Date(holiday.endDate)),
+      reason: holiday.note,
+      status: holiday.status,
+    },
   });
 
   // Critical event fan-out: external HR sheets sync new holiday requests.

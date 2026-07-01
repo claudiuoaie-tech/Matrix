@@ -3,6 +3,7 @@
 import { getToken } from "./session";
 import { getAdminKey } from "./adminSession";
 import type {
+  AdminHolidayRequest,
   AdminWorker,
   AvailabilityCell,
   BoardCell,
@@ -442,6 +443,23 @@ export const admin = {
       admin: true,
     });
   },
+
+  // ---- Holiday requests ----
+  adminHolidays: (status?: "PENDING" | "APPROVED" | "REJECTED") =>
+    request<AdminHolidayRequest[]>(
+      `/api/admin/holidays${status ? `?status=${status}` : ""}`,
+      { admin: true }
+    ),
+  approveHoliday: (id: string) =>
+    request<{ ok: boolean; status: string }>(`/api/admin/holidays/${id}/approve`, {
+      method: "POST",
+      admin: true,
+    }),
+  rejectHoliday: (id: string) =>
+    request<{ ok: boolean; status: string }>(`/api/admin/holidays/${id}/reject`, {
+      method: "POST",
+      admin: true,
+    }),
 
   // ---- Shift templates ----
   templates: (clientId: string) =>

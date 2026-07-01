@@ -2,7 +2,7 @@ import { Router, Request, Response } from "express";
 import fs from "fs";
 import path from "path";
 import { randomUUID } from "crypto";
-import type { ClientPool, RotaStatus, DocType, MessageChannel } from "@prisma/client";
+import type { ClientPool, RotaStatus, DocType, MessageChannel, HolidayStatus } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { sendSms, sendWhatsApp, sendMessage, sendWhatsAppTemplate, toE164 } from "../lib/twilio";
 import {
@@ -2544,6 +2544,167 @@ adminRouter.get("/board/replacements", async (req: Request, res: Response): Prom
     candidates: scored.slice(0, 5),
   });
 });
+
+// ----------------------------------------------------------------------------
+// Holiday requests
+// ----------------------------------------------------------------------------
+
+/** Every UTC day-key (YYYY-MM-DD) from start..end inclusive (capped defensively). */
+function holidayDayKeys(start: Date, end: Date): string[] {
+  const DAY = 86_400_000;
+  const first = dateOnlyUTC(ymdFromUTC(new Date(start))).getTime();
+  const last = dateOnlyUTC(ymdFromUTC(new Date(end))).getTime();
+  const keys: string[] = [];
+  for (let t = first, i = 0; t <= last && i < 400; t += DAY, i++) {
+    keys.push(ymdFromUTC(new Date(t)));
+  }
+  return keys;
+}
+
+/** Human date range for the decision SMS: "13/07/2026" or "13/07/2026–17/07/2026". */
+function holidayRangeLabel(start: Date, end: Date): string {
+  const a = formatDateUk(new Date(start));
+  const b = formatDateUk(new Date(end));
+  return a === b ? a : `${a}–${b}`;
+}
+
+/**
+ * Notify a worker of a holiday decision on their preferred channel (best-effort;
+ * a delivery failure must never fail the admin's action).
+ */
+async function notifyHolidayDecision(
+  worker: { phone: string; preferredChannel: MessageChannel },
+  start: Date,
+  end: Date,
+  approved: boolean
+): Promise<void> {
+  const body = `Your holiday request for ${holidayRangeLabel(start, end)} has been ${
+    approved ? "Approved" : "Declined"
+  } by Fast Rec.`;
+  const result = await sendMessage(worker.phone, body, worker.preferredChannel);
+  if (!result.ok) {
+    console.error("[holiday] decision notification failed:", result.code, result.message);
+  }
+}
+
+/**
+ * GET /api/admin/holidays?status=PENDING — holiday requests for the admin view.
+ * Omit `status` for all requests. Includes the worker's name + the reason (note).
+ */
+adminRouter.get("/holidays", async (req: Request, res: Response): Promise<void> => {
+  const statusRaw = String(req.query.status ?? "").toUpperCase();
+  const status =
+    statusRaw === "PENDING" || statusRaw === "APPROVED" || statusRaw === "REJECTED"
+      ? (statusRaw as HolidayStatus)
+      : undefined;
+
+  const rows = await prisma.holidayRequest.findMany({
+    where: status ? { status } : {},
+    orderBy: [{ createdAt: "desc" }],
+    include: { worker: { select: { name: true } } },
+  });
+
+  res.json(
+    rows.map((h) => ({
+      id: h.id,
+      workerId: h.workerId,
+      workerName: h.worker?.name ?? null,
+      startDate: ymdFromUTC(new Date(h.startDate)),
+      endDate: ymdFromUTC(new Date(h.endDate)),
+      status: h.status,
+      reason: h.note,
+      createdAt: h.createdAt.toISOString(),
+    }))
+  );
+});
+
+/**
+ * POST /api/admin/holidays/:id/approve — approve a request. Sets APPROVED, blocks
+ * every day of the range as a HOLIDAY cell on the rota board (so coordinators
+ * can't schedule the worker), and texts the worker on their preferred channel.
+ */
+adminRouter.post(
+  "/holidays/:id/approve",
+  async (req: Request, res: Response): Promise<void> => {
+    const holiday = await prisma.holidayRequest.findUnique({
+      where: { id: req.params.id },
+      include: {
+        worker: { select: { id: true, name: true, phone: true, preferredChannel: true } },
+      },
+    });
+    if (!holiday) {
+      res.status(404).json({ error: "Holiday request not found" });
+      return;
+    }
+
+    await prisma.holidayRequest.update({
+      where: { id: holiday.id },
+      data: { status: "APPROVED" },
+    });
+
+    // Rota lockout: mark each calendar day as HOLIDAY on the board.
+    for (const key of holidayDayKeys(holiday.startDate, holiday.endDate)) {
+      const date = dateOnlyUTC(key);
+      await prisma.rotaCell.upsert({
+        where: { workerId_date: { workerId: holiday.workerId, date } },
+        create: { workerId: holiday.workerId, date, status: "HOLIDAY", confirmed: false },
+        update: { status: "HOLIDAY", confirmed: false, startTime: null, endTime: null },
+      });
+    }
+
+    emitRotaEvent({
+      type: "holiday.updated",
+      payload: { holidayId: holiday.id, workerId: holiday.workerId, status: "APPROVED" },
+    });
+    emitRotaEvent({ type: "board.updated", payload: { workerId: holiday.workerId } });
+
+    await notifyHolidayDecision(holiday.worker, holiday.startDate, holiday.endDate, true);
+
+    res.json({ ok: true, status: "APPROVED" });
+  }
+);
+
+/**
+ * POST /api/admin/holidays/:id/reject — reject a request. Sets REJECTED, frees the
+ * calendar (removes any HOLIDAY cells previously created for the range), and texts
+ * the worker.
+ */
+adminRouter.post(
+  "/holidays/:id/reject",
+  async (req: Request, res: Response): Promise<void> => {
+    const holiday = await prisma.holidayRequest.findUnique({
+      where: { id: req.params.id },
+      include: {
+        worker: { select: { id: true, name: true, phone: true, preferredChannel: true } },
+      },
+    });
+    if (!holiday) {
+      res.status(404).json({ error: "Holiday request not found" });
+      return;
+    }
+
+    await prisma.holidayRequest.update({
+      where: { id: holiday.id },
+      data: { status: "REJECTED" },
+    });
+
+    // Free the calendar: clear any HOLIDAY blocks we created for this range.
+    const dates = holidayDayKeys(holiday.startDate, holiday.endDate).map((k) => dateOnlyUTC(k));
+    await prisma.rotaCell.deleteMany({
+      where: { workerId: holiday.workerId, date: { in: dates }, status: "HOLIDAY" },
+    });
+
+    emitRotaEvent({
+      type: "holiday.updated",
+      payload: { holidayId: holiday.id, workerId: holiday.workerId, status: "REJECTED" },
+    });
+    emitRotaEvent({ type: "board.updated", payload: { workerId: holiday.workerId } });
+
+    await notifyHolidayDecision(holiday.worker, holiday.startDate, holiday.endDate, false);
+
+    res.json({ ok: true, status: "REJECTED" });
+  }
+);
 
 // ----------------------------------------------------------------------------
 // Shift templates (per client)

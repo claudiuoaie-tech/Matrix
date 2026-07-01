@@ -15,7 +15,10 @@ export type RotaEventType =
   | "worker.updated"
   | "broadcast.sent"
   | "availability.updated"
-  | "holiday.created"
+  // A worker submitted a holiday request (feeds the admin Holiday Requests view).
+  | "holiday.requested"
+  // A holiday request was approved / rejected by an admin.
+  | "holiday.updated"
   | "board.updated"
   | "message.received"
   // An outbound message's delivery status changed (Twilio callback): drives the
