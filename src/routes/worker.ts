@@ -302,6 +302,50 @@ workerRouter.post("/holidays", async (req: Request, res: Response): Promise<void
 });
 
 /**
+ * DELETE /api/worker/holidays/:id — withdraw the worker's own holiday request.
+ * Allowed for a PENDING request (cancels it before a decision) or an APPROVED one
+ * (cancels the holiday and frees the calendar by clearing its HOLIDAY blocks).
+ * The request row is removed either way. Notifies admins so their list/badge sync.
+ */
+workerRouter.delete("/holidays/:id", async (req: Request, res: Response): Promise<void> => {
+  const workerId = req.worker!.id;
+  const holiday = await prisma.holidayRequest.findUnique({ where: { id: req.params.id } });
+  if (!holiday || holiday.workerId !== workerId) {
+    res.status(404).json({ error: "Holiday request not found" });
+    return;
+  }
+
+  let freedCalendar = false;
+  // An approved holiday put HOLIDAY blocks on the board — remove them so the
+  // worker is bookable again.
+  if (holiday.status === "APPROVED") {
+    const DAY = 86_400_000;
+    const first = dateOnlyUTC(ymdFromUTC(new Date(holiday.startDate))).getTime();
+    const last = dateOnlyUTC(ymdFromUTC(new Date(holiday.endDate))).getTime();
+    const dates: Date[] = [];
+    for (let t = first, i = 0; t <= last && i < 400; t += DAY, i++) {
+      dates.push(new Date(t));
+    }
+    await prisma.rotaCell.deleteMany({
+      where: { workerId, date: { in: dates }, status: "HOLIDAY" },
+    });
+    freedCalendar = true;
+  }
+
+  await prisma.holidayRequest.delete({ where: { id: holiday.id } });
+
+  emitRotaEvent({
+    type: "holiday.updated",
+    payload: { holidayId: holiday.id, workerId, status: "WITHDRAWN" },
+  });
+  if (freedCalendar) {
+    emitRotaEvent({ type: "board.updated", payload: { workerId } });
+  }
+
+  res.json({ ok: true });
+});
+
+/**
  * GET /api/worker/board?start=YYYY-MM-DD
  * The worker's own 14-day status cells (Monday-anchored).
  */

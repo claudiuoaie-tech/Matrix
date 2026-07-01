@@ -605,6 +605,22 @@ function HolidaysTab() {
 
   useEffect(load, [load]);
 
+  const [withdrawingId, setWithdrawingId] = useState<string | null>(null);
+  async function withdraw(h: HolidayRequest) {
+    const label = h.status === "APPROVED" ? "cancel this approved holiday" : "withdraw this request";
+    if (!window.confirm(`Are you sure you want to ${label}?`)) return;
+    setWithdrawingId(h.id);
+    setError(null);
+    try {
+      await workerApi.withdrawHoliday(h.id);
+      load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not withdraw request");
+    } finally {
+      setWithdrawingId(null);
+    }
+  }
+
   // Inclusive day count for the selected range (0 when incomplete).
   const days =
     start && end && end >= start
@@ -753,17 +769,34 @@ function HolidaysTab() {
                   </p>
                   {h.note && <p className="text-xs text-muted">{h.note}</p>}
                 </div>
-                <span
-                  className={`rounded-full border px-2 py-0.5 text-xs font-medium ${
-                    h.status === "APPROVED"
-                      ? "bg-emerald-100 text-emerald-700 border-emerald-200"
-                      : h.status === "REJECTED"
-                      ? "bg-rose-100 text-rose-700 border-rose-200"
-                      : "bg-amber-100 text-amber-700 border-amber-200"
-                  }`}
-                >
-                  {h.status.charAt(0) + h.status.slice(1).toLowerCase()}
-                </span>
+                <div className="flex items-center gap-2">
+                  <span
+                    className={`rounded-full border px-2 py-0.5 text-xs font-medium ${
+                      h.status === "APPROVED"
+                        ? "bg-emerald-100 text-emerald-700 border-emerald-200"
+                        : h.status === "REJECTED"
+                        ? "bg-rose-100 text-rose-700 border-rose-200"
+                        : "bg-amber-100 text-amber-700 border-amber-200"
+                    }`}
+                  >
+                    {h.status.charAt(0) + h.status.slice(1).toLowerCase()}
+                  </span>
+                  {h.status !== "REJECTED" && (
+                    <button
+                      onClick={() => withdraw(h)}
+                      disabled={withdrawingId === h.id}
+                      title={h.status === "APPROVED" ? "Cancel this holiday" : "Withdraw request"}
+                      className="inline-flex items-center gap-1 rounded-lg border border-border bg-white px-2 py-1 text-xs font-medium text-muted hover:bg-slate-50 hover:text-rose-600 disabled:opacity-50"
+                    >
+                      {withdrawingId === h.id ? (
+                        <Loader2 size={13} className="animate-spin" />
+                      ) : (
+                        <X size={13} />
+                      )}
+                      {h.status === "APPROVED" ? "Cancel" : "Withdraw"}
+                    </button>
+                  )}
+                </div>
               </div>
             ))}
           </div>

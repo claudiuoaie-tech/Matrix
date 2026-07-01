@@ -185,6 +185,15 @@ export interface HolidayRequest {
   note: string | null;
 }
 
+/** An active shift a holiday approval would vacate (shown in the warning modal). */
+export interface HolidayConflict {
+  date: string; // YYYY-MM-DD
+  dateLabel: string; // DD/MM/YYYY
+  clientName: string | null;
+  startTime: string | null;
+  confirmed: boolean;
+}
+
 /** A holiday request as seen by the admin console (worker name + reason + created). */
 export interface AdminHolidayRequest {
   id: string;

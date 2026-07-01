@@ -6,6 +6,7 @@ import type {
   AdminHolidayRequest,
   AdminWorker,
   AvailabilityCell,
+  HolidayConflict,
   BoardCell,
   BoardResponse,
   BulkSendResponse,
@@ -134,6 +135,8 @@ export const worker = {
       auth: true,
       body: { startDate, endDate, note },
     }),
+  withdrawHoliday: (id: string) =>
+    request<{ ok: boolean }>(`/api/worker/holidays/${id}`, { method: "DELETE", auth: true }),
   board: (start?: string) =>
     request<WorkerBoardResponse>(
       `/api/worker/board${start ? `?start=${start}` : ""}`,
@@ -450,11 +453,15 @@ export const admin = {
       `/api/admin/holidays${status ? `?status=${status}` : ""}`,
       { admin: true }
     ),
-  approveHoliday: (id: string) =>
-    request<{ ok: boolean; status: string }>(`/api/admin/holidays/${id}/approve`, {
-      method: "POST",
+  holidayConflicts: (id: string) =>
+    request<{ conflicts: HolidayConflict[] }>(`/api/admin/holidays/${id}/conflicts`, {
       admin: true,
     }),
+  approveHoliday: (id: string, force = false) =>
+    request<{ ok: boolean; status: string; vacated?: number }>(
+      `/api/admin/holidays/${id}/approve`,
+      { method: "POST", admin: true, body: { force } }
+    ),
   rejectHoliday: (id: string) =>
     request<{ ok: boolean; status: string }>(`/api/admin/holidays/${id}/reject`, {
       method: "POST",

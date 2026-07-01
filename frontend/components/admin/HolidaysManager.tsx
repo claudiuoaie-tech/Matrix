@@ -1,9 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Loader2, Check, X, CalendarDays, User, Plane } from "lucide-react";
+import { Loader2, Check, X, CalendarDays, User, Plane, AlertTriangle } from "lucide-react";
 import { admin } from "@/lib/api";
-import type { AdminHolidayRequest, HolidayStatus } from "@/lib/types";
+import type { AdminHolidayRequest, HolidayConflict, HolidayStatus } from "@/lib/types";
 import { useRotaEventListener, type Subscribe } from "@/lib/useRotaEvents";
 
 type Filter = "PENDING" | "APPROVED" | "REJECTED" | "ALL";
@@ -36,6 +36,11 @@ export default function HolidaysManager({ subscribe }: { subscribe: Subscribe })
   const [loading, setLoading] = useState(true);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Conflict warning modal: set when Approve would vacate active shifts.
+  const [conflictModal, setConflictModal] = useState<{
+    holiday: AdminHolidayRequest;
+    conflicts: HolidayConflict[];
+  } | null>(null);
 
   const load = useCallback(() => {
     setLoading(true);
@@ -53,15 +58,52 @@ export default function HolidaysManager({ subscribe }: { subscribe: Subscribe })
     if (e.type === "holiday.requested" || e.type === "holiday.updated") load();
   });
 
-  async function decide(id: string, action: "approve" | "reject") {
+  // Approve: first check for conflicting active shifts. None → approve straight
+  // away; some → open the warning modal so the admin explicitly confirms the vacate.
+  async function onApprove(h: AdminHolidayRequest) {
+    setBusyId(h.id);
+    setError(null);
+    try {
+      const { conflicts } = await admin.holidayConflicts(h.id);
+      if (conflicts.length > 0) {
+        setConflictModal({ holiday: h, conflicts });
+        return;
+      }
+      await admin.approveHoliday(h.id, false);
+      load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not approve");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  // Confirmed vacate: force-approve, which flips the conflicting shifts + locks
+  // the days as HOLIDAY server-side.
+  async function confirmVacate() {
+    if (!conflictModal) return;
+    const id = conflictModal.holiday.id;
     setBusyId(id);
     setError(null);
     try {
-      if (action === "approve") await admin.approveHoliday(id);
-      else await admin.rejectHoliday(id);
+      await admin.approveHoliday(id, true);
+      setConflictModal(null);
       load();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Action failed");
+      setError(e instanceof Error ? e.message : "Could not approve");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function onReject(id: string) {
+    setBusyId(id);
+    setError(null);
+    try {
+      await admin.rejectHoliday(id);
+      load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not reject");
     } finally {
       setBusyId(null);
     }
@@ -135,7 +177,7 @@ export default function HolidaysManager({ subscribe }: { subscribe: Subscribe })
                 {h.status === "PENDING" ? (
                   <div className="flex shrink-0 gap-2">
                     <button
-                      onClick={() => decide(h.id, "approve")}
+                      onClick={() => onApprove(h)}
                       disabled={busyId === h.id}
                       className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
                     >
@@ -147,7 +189,7 @@ export default function HolidaysManager({ subscribe }: { subscribe: Subscribe })
                       Approve
                     </button>
                     <button
-                      onClick={() => decide(h.id, "reject")}
+                      onClick={() => onReject(h.id)}
                       disabled={busyId === h.id}
                       className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-white px-3 py-2 text-sm font-medium text-rose-600 hover:bg-rose-50 disabled:opacity-50"
                     >
@@ -160,6 +202,73 @@ export default function HolidaysManager({ subscribe }: { subscribe: Subscribe })
           </ul>
         )}
       </div>
+
+      {conflictModal && (
+        <div
+          className="fixed inset-0 z-[70] grid place-items-center bg-black/40 p-4"
+          onClick={() => busyId === null && setConflictModal(null)}
+        >
+          <div
+            className="w-full max-w-md rounded-2xl border border-border bg-card p-5 shadow-xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="mb-3 flex items-start gap-2">
+              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-amber-100 text-amber-700">
+                <AlertTriangle size={18} />
+              </span>
+              <div>
+                <h3 className="font-semibold text-foreground">Scheduling conflict</h3>
+                <p className="text-sm text-muted">
+                  {conflictModal.holiday.workerName ?? "This worker"} has active shifts inside
+                  this holiday. Approving will <strong>vacate</strong> them and re-open the slots.
+                </p>
+              </div>
+            </div>
+
+            <ul className="mb-4 max-h-52 space-y-1.5 overflow-y-auto thin-scroll rounded-lg border border-border bg-slate-50/60 p-2 text-sm">
+              {conflictModal.conflicts.map((c) => (
+                <li key={c.date} className="flex items-center gap-2">
+                  <span
+                    className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${
+                      c.confirmed
+                        ? "bg-emerald-100 text-emerald-700"
+                        : "bg-amber-100 text-amber-700"
+                    }`}
+                  >
+                    {c.confirmed ? "Confirmed" : "Pending"}
+                  </span>
+                  <span className="text-foreground">
+                    {c.clientName ?? "Unassigned"}
+                    {c.startTime ? ` · ${c.startTime}` : ""} · {c.dateLabel}
+                  </span>
+                </li>
+              ))}
+            </ul>
+
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setConflictModal(null)}
+                disabled={busyId !== null}
+                className="rounded-lg border border-border bg-white px-3 py-2 text-sm font-medium text-muted hover:bg-slate-50 disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmVacate}
+                disabled={busyId !== null}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-rose-600 px-3 py-2 text-sm font-semibold text-white hover:bg-rose-700 disabled:opacity-50"
+              >
+                {busyId !== null ? (
+                  <Loader2 size={15} className="animate-spin" />
+                ) : (
+                  <Check size={15} />
+                )}
+                Approve &amp; vacate shifts
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

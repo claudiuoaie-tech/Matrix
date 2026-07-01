@@ -2618,14 +2618,79 @@ adminRouter.get("/holidays", async (req: Request, res: Response): Promise<void> 
   );
 });
 
+/** A conflicting active shift a holiday approval would vacate. */
+interface HolidayConflict {
+  date: string; // YYYY-MM-DD
+  dateLabel: string; // DD/MM/YYYY
+  clientName: string | null;
+  startTime: string | null;
+  confirmed: boolean;
+}
+
 /**
- * POST /api/admin/holidays/:id/approve — approve a request. Sets APPROVED, blocks
- * every day of the range as a HOLIDAY cell on the rota board (so coordinators
- * can't schedule the worker), and texts the worker on their preferred channel.
+ * The worker's active shifts (SCHEDULED cells — confirmed or not) that fall within
+ * the given holiday days. These are the shifts an approval would have to vacate.
+ */
+async function findHolidayConflicts(workerId: string, dates: Date[]): Promise<HolidayConflict[]> {
+  const cells = await prisma.rotaCell.findMany({
+    where: { workerId, date: { in: dates }, status: "SCHEDULED" },
+    orderBy: { date: "asc" },
+  });
+  if (cells.length === 0) return [];
+
+  const clientIds = [...new Set(cells.map((c) => c.clientId).filter((x): x is string => !!x))];
+  const clients = clientIds.length
+    ? await prisma.client.findMany({
+        where: { id: { in: clientIds } },
+        select: { id: true, companyName: true },
+      })
+    : [];
+  const nameById = new Map(clients.map((c) => [c.id, c.companyName]));
+
+  return cells.map((c) => ({
+    date: ymdFromUTC(new Date(c.date)),
+    dateLabel: formatDateUk(new Date(c.date)),
+    clientName: c.clientId ? nameById.get(c.clientId) ?? null : null,
+    startTime: c.startTime,
+    confirmed: c.confirmed,
+  }));
+}
+
+/**
+ * GET /api/admin/holidays/:id/conflicts — the active shifts an approval would
+ * vacate, so the UI can warn before confirming.
+ */
+adminRouter.get(
+  "/holidays/:id/conflicts",
+  async (req: Request, res: Response): Promise<void> => {
+    const holiday = await prisma.holidayRequest.findUnique({
+      where: { id: req.params.id },
+      select: { workerId: true, startDate: true, endDate: true },
+    });
+    if (!holiday) {
+      res.status(404).json({ error: "Holiday request not found" });
+      return;
+    }
+    const dates = holidayDayKeys(holiday.startDate, holiday.endDate).map((k) => dateOnlyUTC(k));
+    const conflicts = await findHolidayConflicts(holiday.workerId, dates);
+    res.json({ conflicts });
+  }
+);
+
+/**
+ * POST /api/admin/holidays/:id/approve — approve a request. Body: { force?: boolean }.
+ *
+ * Safety gate: if the worker has active shifts (SCHEDULED / CONFIRMED) inside the
+ * range and `force` isn't set, responds 409 with the conflicts (the UI warns).
+ * With `force` (or no conflicts): sets APPROVED, VACATES each conflicting shift by
+ * emitting shift.cancelled (so the team sees the re-opened slot in the Alert
+ * Center + can rebook), writes a HOLIDAY block on every day (locking the worker
+ * out), and texts the worker on their preferred channel.
  */
 adminRouter.post(
   "/holidays/:id/approve",
   async (req: Request, res: Response): Promise<void> => {
+    const force = req.body?.force === true;
     const holiday = await prisma.holidayRequest.findUnique({
       where: { id: req.params.id },
       include: {
@@ -2637,13 +2702,47 @@ adminRouter.post(
       return;
     }
 
+    const keys = holidayDayKeys(holiday.startDate, holiday.endDate);
+    const dates = keys.map((k) => dateOnlyUTC(k));
+    const conflicts = await findHolidayConflicts(holiday.workerId, dates);
+
+    // Gate: never silently wipe an active shift — the admin must confirm.
+    if (conflicts.length > 0 && !force) {
+      res.status(409).json({
+        error: "Approving this holiday would vacate active shifts.",
+        conflicts,
+      });
+      return;
+    }
+
     await prisma.holidayRequest.update({
       where: { id: holiday.id },
       data: { status: "APPROVED" },
     });
 
+    // Vacate each conflicting shift: emit shift.cancelled so the team sees the
+    // re-opened slot (Alert Center + Suggested Replacements), then the HOLIDAY
+    // block written below locks the worker out of being re-selected.
+    const now = new Date().toISOString();
+    for (const c of conflicts) {
+      emitRotaEvent({
+        type: "shift.cancelled",
+        payload: {
+          workerId: holiday.workerId,
+          workerName: holiday.worker.name,
+          phone: holiday.worker.phone,
+          clientName: c.clientName,
+          date: c.date,
+          dateLabel: c.dateLabel,
+          startTime: c.startTime,
+          at: now,
+          reason: "holiday_approved",
+        },
+      });
+    }
+
     // Rota lockout: mark each calendar day as HOLIDAY on the board.
-    for (const key of holidayDayKeys(holiday.startDate, holiday.endDate)) {
+    for (const key of keys) {
       const date = dateOnlyUTC(key);
       await prisma.rotaCell.upsert({
         where: { workerId_date: { workerId: holiday.workerId, date } },
@@ -2660,7 +2759,7 @@ adminRouter.post(
 
     await notifyHolidayDecision(holiday.worker, holiday.startDate, holiday.endDate, true);
 
-    res.json({ ok: true, status: "APPROVED" });
+    res.json({ ok: true, status: "APPROVED", vacated: conflicts.length });
   }
 );
 
