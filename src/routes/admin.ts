@@ -73,25 +73,38 @@ const SILENT_OVERRIDE_STATUSES: RotaStatus[] = ["AVAILABLE", "UNAVAILABLE"];
 
 /**
  * The SMS body for an admin status override, or null when no text should be sent
- * (AVAILABLE / UNAVAILABLE). NO_SHOW gets a specialised warning.
+ * (AVAILABLE / UNAVAILABLE). NO_SHOW gets a specialised warning. SCHEDULED is
+ * handled separately by allocationSmsBody() (it needs the worker + client names),
+ * so it never reaches here.
  */
-function overrideSmsBody(
-  status: RotaStatus,
-  date: Date,
-  startTime: string | null,
-  shiftLabel: string | null
-): string | null {
+function overrideSmsBody(status: RotaStatus, date: Date): string | null {
   if (SILENT_OVERRIDE_STATUSES.includes(status)) return null;
   const dayLabel = dateLabelUTC(date);
   if (status === "NO_SHOW") {
     return `Warning: You have been marked as a No Show for your shift on ${dayLabel}. Repeated absences may result in the termination of your assignment.`;
   }
-  let statusLabel: string = status;
-  if (status === "SCHEDULED") {
-    const parts = [shiftLabel, startTime ? `start ${startTime}` : null].filter(Boolean);
-    statusLabel = parts.length ? `SCHEDULED (${parts.join(", ")})` : "SCHEDULED";
-  }
-  return `Your status for ${dayLabel} has been updated to ${statusLabel}.`;
+  return `Your status for ${dayLabel} has been updated to ${status}.`;
+}
+
+/**
+ * The primary shift-allocation SMS, sent the instant a worker is scheduled on the
+ * rota. It asks the worker to reply 1 (CONFIRM) / 2 (REJECT), which the inbound
+ * webhook maps straight back onto the board. When the shift falls on the same day
+ * it's being allocated the date reads "today"; otherwise it's DD/MM/YYYY.
+ */
+function allocationSmsBody(
+  firstName: string,
+  startTime: string | null,
+  date: Date,
+  clientName: string
+): string {
+  const when = ymdFromUTC(date) === ymdFromUTC(new Date()) ? "today" : formatDateUk(date);
+  const time = startTime || "your scheduled time";
+  const at = clientName ? ` at ${clientName}` : "";
+  return (
+    `Hi ${firstName}, you have been allocated a shift at ${time}, ${when}${at}. ` +
+    `Please reply 1 to CONFIRM, 2 to REJECT. Thank you, Fast Rec`
+  );
 }
 
 /**
@@ -132,12 +145,31 @@ async function notifyStatusOverride(
   status: RotaStatus,
   date: Date,
   startTime: string | null,
-  shiftLabel: string | null = null
+  clientId: string | null = null
 ): Promise<boolean> {
-  const body = overrideSmsBody(status, date, startTime, shiftLabel);
-  if (!body) return false;
+  // Cheap gate before we touch the DB: these statuses never text the worker.
+  if (SILENT_OVERRIDE_STATUSES.includes(status)) return false;
   const worker = await prisma.worker.findUnique({ where: { id: workerId } });
   if (!worker) return false;
+
+  let body: string;
+  if (status === "SCHEDULED") {
+    // The allocation copy names the client, so resolve it from the cell.
+    let clientName = "";
+    if (clientId) {
+      const c = await prisma.client.findUnique({
+        where: { id: clientId },
+        select: { companyName: true },
+      });
+      clientName = c?.companyName ?? "";
+    }
+    body = allocationSmsBody(splitName(worker.name).firstName, startTime, date, clientName);
+  } else {
+    const generic = overrideSmsBody(status, date);
+    if (!generic) return false;
+    body = generic;
+  }
+
   await sendSms(worker.phone, body);
   return true;
 }
@@ -1874,7 +1906,7 @@ adminRouter.put("/board/cell", async (req: Request, res: Response): Promise<void
         input.status,
         dateOnlyUTC(input.date),
         input.startTime ?? null,
-        input.label ?? null
+        input.clientId ?? null
       );
   emitRotaEvent({
     type: "board.updated",
@@ -1950,7 +1982,7 @@ adminRouter.put("/board/cells", async (req: Request, res: Response): Promise<voi
           c.status,
           dateOnlyUTC(c.date),
           c.startTime ?? null,
-          c.label ?? null
+          c.clientId ?? null
         )
       ) {
         smsSent += 1;

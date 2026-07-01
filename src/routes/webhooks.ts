@@ -5,6 +5,7 @@ import { prisma } from "../lib/prisma";
 import { validateTwilioSignature } from "../middleware/validateTwilioSignature";
 import { acceptAllocation, declineAllocation } from "../lib/allocations";
 import { emitRotaEvent } from "../lib/events";
+import { ymdFromUTC, dateOnlyUTC } from "../lib/board";
 
 export const webhooksRouter = Router();
 
@@ -86,37 +87,72 @@ async function touchWhatsappWindow(phone: string): Promise<void> {
   }
 }
 
-/** True if the reply contains an accept signal: a standalone "1" or "YES". */
+/**
+ * True if the reply is an acceptance: "1", "yes", "y", "ok"/"okay", or "confirm"
+ * (case-insensitive), matched on word boundaries so "y" / "n" only fire when they
+ * stand alone.
+ */
 function isAffirmative(body: string): boolean {
-  return /\b1\b/.test(body) || /\byes\b/i.test(body);
+  return /\b(1|y|yes|ok|okay|confirm|confirmed)\b/i.test(body);
 }
 
-/** True if the reply contains a decline signal: a standalone "2" or "NO". */
+/**
+ * True if the reply is a rejection: "2", "no", "n", "reject", or "not available"
+ * (case-insensitive).
+ */
 function isNegative(body: string): boolean {
-  return /\b2\b/.test(body) || /\bno\b/i.test(body);
+  return /\b(2|n|no|reject|rejected)\b/i.test(body) || /\bnot\s+available\b/i.test(body);
+}
+
+/** Confirmation reply sent when a worker accepts. */
+const CONFIRM_REPLY = "Thank you. Your shift has been locked in and confirmed.";
+/** Reply sent when a worker rejects. */
+const REJECT_REPLY =
+  "Thank you for letting us know. We have removed you from this shift request.";
+
+/** The pending board cell we can action from an inbound reply. */
+type PendingCell = { id: string; workerId: string; date: Date };
+
+/**
+ * The worker's most relevant pending board shift: a SCHEDULED cell not yet
+ * confirmed, dated today or later. This is how a shift allocated directly on the
+ * rota board (which writes a RotaCell, not an Allocation) is confirmed/rejected
+ * over SMS. Soonest upcoming shift wins.
+ */
+async function findPendingCell(workerId: string): Promise<PendingCell | null> {
+  const today = dateOnlyUTC(ymdFromUTC(new Date()));
+  return prisma.rotaCell.findFirst({
+    where: { workerId, status: "SCHEDULED", confirmed: false, date: { gte: today } },
+    orderBy: [{ date: "asc" }, { updatedAt: "desc" }],
+    select: { id: true, workerId: true, date: true },
+  });
 }
 
 /**
- * How far back a closed shift offer still counts as "recent" — long enough that a
- * worker who replies "YES" a while after the offer lapsed still gets a helpful
- * "that shift's gone" note rather than silence.
+ * Confirm a pending board cell: flip `confirmed` true (this drives the green dot
+ * + double-tick marker on the board) and push a real-time board update.
  */
-const RECENT_OFFER_MS = 48 * 60 * 60 * 1000;
+async function confirmPendingCell(cell: PendingCell): Promise<void> {
+  await prisma.rotaCell.update({ where: { id: cell.id }, data: { confirmed: true } });
+  emitRotaEvent({
+    type: "board.updated",
+    payload: { workerId: cell.workerId, date: ymdFromUTC(cell.date) },
+  });
+}
 
 /**
- * Whether this worker has a recently-closed offer: an allocation that TIMED OUT
- * (the offer expired, or the shift filled the moment they tried to take it)
- * within the last 48h. Used to distinguish an explicit attempt to claim a shift
- * that has since gone — the ONLY case we auto-reply about when there's no live
- * proposal — from ordinary chatter we should just log quietly.
+ * Reject a pending board cell: move it out of the active shift cartridge into the
+ * REJECTED cartridge (freeing the slot) and push a real-time board update.
  */
-async function hasRecentlyClosedOffer(workerId: string): Promise<boolean> {
-  const since = new Date(Date.now() - RECENT_OFFER_MS);
-  const closed = await prisma.allocation.findFirst({
-    where: { workerId, state: "TIMEOUT", updatedAt: { gte: since } },
-    select: { id: true },
+async function rejectPendingCell(cell: PendingCell): Promise<void> {
+  await prisma.rotaCell.update({
+    where: { id: cell.id },
+    data: { status: "REJECTED", confirmed: false, startTime: null, endTime: null },
   });
-  return !!closed;
+  emitRotaEvent({
+    type: "board.updated",
+    payload: { workerId: cell.workerId, date: ymdFromUTC(cell.date) },
+  });
 }
 
 /** Build a TwiML response containing a single SMS reply and send it. */
@@ -190,55 +226,53 @@ webhooksRouter.post(
         return;
       }
 
-      // 2. Parse the reply. A message COUNTS as an accept if it contains "1" or
-      //    "YES", and as a decline if it contains "2" or "NO" (case-insensitive),
-      //    so "1", "yes please", "2 sorry", "no can do" all work.
+      // 2. Parse the reply intent. Accept: 1 / yes / y / ok / confirm. Reject:
+      //    2 / no / n / reject / not available. We only act on a CLEAR single
+      //    intent (exactly one of the two) — a contradictory or empty reply is
+      //    treated as ordinary chatter and logged quietly.
       const accept = isAffirmative(body);
       const decline = isNegative(body);
+      const clearIntent = accept !== decline;
 
-      // 3. Find the most recent PROPOSED allocation for this worker.
+      // 3. Prefer a live PROPOSED allocation (the SMS-invite / broadcast flow),
+      //    which routes through the transactional accept/decline helpers (they
+      //    also reflect onto the board cell).
       const allocation = await prisma.allocation.findFirst({
         where: { workerId: worker.id, state: "PROPOSED" },
         orderBy: { updatedAt: "desc" },
-        include: { shift: true },
+        select: { id: true, shiftId: true },
       });
 
-      // 4. There IS a live offer on the table → run the accept/decline flow.
-      if (allocation) {
-        if (accept && !decline) {
+      if (allocation && clearIntent) {
+        if (accept) {
           await handleAccept(res, allocation.id, allocation.shiftId);
           return;
         }
-        if (decline && !accept) {
-          await declineAllocation(allocation.id, allocation.shiftId);
-          replyTwiml(
-            res,
-            "Thanks for letting us know — we've recorded that you're not available for this shift. We'll keep you posted on future work."
-          );
+        await declineAllocation(allocation.id, allocation.shiftId);
+        replyTwiml(res, REJECT_REPLY);
+        return;
+      }
+
+      // 4. Otherwise action a pending board shift allocated directly on the rota
+      //    (a SCHEDULED, not-yet-confirmed cell — no Allocation row). Accept flips
+      //    the confirmation marker; reject drops it into the REJECTED cartridge.
+      if (!allocation && clearIntent) {
+        const cell = await findPendingCell(worker.id);
+        if (cell) {
+          if (accept) {
+            await confirmPendingCell(cell);
+            replyTwiml(res, CONFIRM_REPLY);
+            return;
+          }
+          await rejectPendingCell(cell);
+          replyTwiml(res, REJECT_REPLY);
           return;
         }
-        // An open offer but an ambiguous / contradictory reply — guide them to a
-        // clear answer (they're clearly responding to the offer).
-        replyTwiml(
-          res,
-          "Sorry, we didn't understand that. Reply 1 (or YES) to ACCEPT the offered shift, or 2 (or NO) to DECLINE."
-        );
-        return;
       }
 
-      // 5. NO live offer. Only auto-reply when the worker is explicitly trying to
-      //    CLAIM a shift that has since expired or been filled (an affirmative +
-      //    a recently-closed offer). Everything else — questions, "OK", "thanks",
-      //    a bare "YES" with no shift context — is already logged above and is
-      //    left to a human, with no canned auto-reply.
-      if (accept && !decline && (await hasRecentlyClosedOffer(worker.id))) {
-        replyTwiml(
-          res,
-          "Sorry, that shift is no longer available — it's just been filled or the offer has expired. We'll be in touch with the next opportunity."
-        );
-        return;
-      }
-
+      // 5. No actionable pending shift, or an ambiguous / casual reply ("thanks",
+      //    a question, a keyword with nothing to confirm): the message is already
+      //    logged to the thread above — stay silent so an admin can reply by hand.
       replyEmpty(res);
     } catch (err) {
       console.error("[twilio webhook] error:", err);
@@ -292,10 +326,7 @@ async function handleAccept(
   const outcome = await acceptAllocation(allocationId, shiftId);
 
   if (outcome === "CONFIRMED") {
-    replyTwiml(
-      res,
-      "You're confirmed for the shift — thank you! We'll send the full details shortly. See you there."
-    );
+    replyTwiml(res, CONFIRM_REPLY);
     return;
   }
 
