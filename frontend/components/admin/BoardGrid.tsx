@@ -377,6 +377,39 @@ export default function BoardGrid({ lastEvent }: { lastEvent: RotaEvent | null }
 
   useEffect(() => {
     if (!lastEvent) return;
+
+    // A late cancellation emits board.updated + shift.cancelled synchronously, so
+    // React coalesces them and this effect only sees the LAST one (shift.cancelled).
+    // Handle it explicitly: optimistically flip the exact cell out of the active
+    // (green/confirmed) schedule into REJECTED for instant feedback, then reconcile
+    // with a fresh fetch — so the grid matches the alert card without a reload.
+    if (lastEvent.type === "shift.cancelled") {
+      const p = lastEvent.payload as { workerId?: string; date?: string };
+      if (p.workerId && p.date) {
+        const workerId = p.workerId;
+        const date = p.date;
+        setBoard((prev) => {
+          if (!prev) return prev;
+          return {
+            ...prev,
+            workers: prev.workers.map((w) =>
+              w.id === workerId && w.cells[date]
+                ? {
+                    ...w,
+                    cells: {
+                      ...w.cells,
+                      [date]: { ...w.cells[date], status: "REJECTED", confirmed: false },
+                    },
+                  }
+                : w
+            ),
+          };
+        });
+      }
+      loadBoard();
+      return;
+    }
+
     if (lastEvent.type === "board.updated" || lastEvent.type === "allocation.updated") {
       loadBoard();
     }
