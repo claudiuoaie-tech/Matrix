@@ -14,7 +14,6 @@ export default function WorkerLogin() {
   const [step, setStep] = useState<Step>("phone");
   const [phone, setPhone] = useState("");
   const [code, setCode] = useState("");
-  const [devCode, setDevCode] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -23,9 +22,9 @@ export default function WorkerLogin() {
     setError(null);
     setBusy(true);
     try {
-      const res = await auth.requestOtp(phone.trim());
-      setDevCode(res.devCode ?? null);
-      if (res.devCode) setCode(res.devCode); // frictionless: prefill in dev
+      // The code is delivered by SMS only — it is never returned by the API, so
+      // there's nothing to prefill. The user must enter what they received.
+      await auth.requestOtp(phone.trim());
       setStep("code");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not send code");
@@ -112,11 +111,6 @@ export default function WorkerLogin() {
                   className="w-full tracking-[0.5em] text-center text-2xl rounded-xl border border-border bg-white px-4 py-3 outline-none focus:border-brand focus:ring-2 focus:ring-indigo-100"
                 />
               </div>
-              {devCode && (
-                <p className="text-xs text-muted">
-                  Dev mode: code is <span className="font-mono font-semibold">{devCode}</span> (auto-filled).
-                </p>
-              )}
               <button
                 type="submit"
                 disabled={busy || code.length < 6}

@@ -26,6 +26,7 @@ import {
   dateOnlyUTC,
   ymdFromUTC,
   splitName,
+  formatDateUk,
 } from "../lib/board";
 
 // Uploaded document storage (created on demand).
@@ -286,7 +287,9 @@ adminRouter.get("/workers", async (_req: Request, res: Response): Promise<void> 
 /** POST /api/admin/workers — create a worker. */
 adminRouter.post("/workers", async (req: Request, res: Response): Promise<void> => {
   const name = String(req.body?.name ?? "").trim();
-  const phone = String(req.body?.phone ?? "").trim().replace(/\s+/g, "");
+  // Normalise to E.164 on the way in so "07…" and "+44…" can't create duplicate
+  // records or break Twilio/login lookups later.
+  const phone = toE164(String(req.body?.phone ?? ""));
   const clientPool = String(req.body?.clientPool ?? "");
 
   if (!name || !phone || !POOLS.includes(clientPool as ClientPool)) {
@@ -364,7 +367,7 @@ adminRouter.put("/workers/:id", async (req: Request, res: Response): Promise<voi
     data.email = email;
   }
   if (req.body?.name != null) data.name = String(req.body.name).trim();
-  if (req.body?.phone != null) data.phone = String(req.body.phone).trim().replace(/\s+/g, "");
+  if (req.body?.phone != null) data.phone = toE164(String(req.body.phone));
   if (req.body?.clientPool != null && POOLS.includes(req.body.clientPool)) {
     data.clientPool = req.body.clientPool;
   }
@@ -567,7 +570,7 @@ adminRouter.post("/workers/import", async (req: Request, res: Response): Promise
     const rowNum = r + 1; // 1-based incl. header, for human-friendly messages
     try {
       const name = `${get(col.first)} ${get(col.last)}`.trim();
-      const phone = get(col.phone).replace(/\s+/g, "");
+      const phone = get(col.phone) ? toE164(get(col.phone)) : "";
       const email = normalizeEmail(get(col.email));
       const skillsRaw = get(col.skills);
       const skills = sanitizeSkills(skillsRaw);
@@ -805,7 +808,7 @@ adminRouter.post(
     }
 
     const s = allocation.shift;
-    const dateStr = new Date(s.date).toLocaleDateString();
+    const dateStr = formatDateUk(new Date(s.date));
     await sendSms(
       allocation.worker.phone,
       `Reminder: ${s.client.companyName} still needs you for the ${s.slot} shift on ${dateStr} (${s.startTime}-${s.endTime}). Reply 1 to accept or 2 to decline.`
@@ -1075,6 +1078,31 @@ adminRouter.post(
   }
 );
 
+/**
+ * POST /api/admin/messages/read-thread — mark one conversation as read.
+ * Body: { phone: string }. Fired when an admin opens a thread, so unread clears
+ * per-conversation without forcing the global "Mark all read". The thread key is
+ * the contact's number (fromNumber); we match it verbatim and also on its E.164
+ * form so a differently-formatted caller still clears the right thread.
+ */
+adminRouter.post(
+  "/messages/read-thread",
+  async (req: Request, res: Response): Promise<void> => {
+    const phone = String(req.body?.phone ?? "").trim();
+    if (!phone) {
+      res.status(400).json({ error: "phone is required" });
+      return;
+    }
+    const keys = Array.from(new Set([phone, toE164(phone)]));
+    const result = await prisma.incomingMessage.updateMany({
+      where: { fromNumber: { in: keys }, isRead: false },
+      data: { isRead: true },
+    });
+    const unread = await prisma.incomingMessage.count({ where: { isRead: false } });
+    res.json({ ok: true, updated: result.count, unread });
+  }
+);
+
 /** Map a "sms" | "whatsapp" body field to the MessageChannel enum (SMS default). */
 function parseChannelType(raw: unknown): MessageChannel {
   return String(raw ?? "sms").toLowerCase() === "whatsapp" ? "WHATSAPP" : "SMS";
@@ -1276,14 +1304,16 @@ adminRouter.post(
       return;
     }
 
-    // Build the positional variable map from the template definition, falling
-    // back to each variable's sample when the admin left a field blank.
-    const values: Record<string, string> = {};
-    for (const v of template.variables) {
-      const provided =
-        rawVars && typeof rawVars === "object" ? (rawVars as Record<string, unknown>)[v.position] : undefined;
-      values[v.position] = String(provided ?? "").trim() || v.sample;
-    }
+    // Personalise the worker-name slot from the matched worker; every other slot
+    // is exactly what the admin typed (a cleared field sends blank — we never
+    // fall back to the catalog sample).
+    const worker = await prisma.worker.findUnique({
+      where: { phone: toE164(phoneNumber) },
+      select: { name: true },
+    });
+    const overrides =
+      rawVars && typeof rawVars === "object" ? (rawVars as Record<string, unknown>) : {};
+    const values = buildTemplateValues(template, overrides, worker?.name);
 
     const result = await sendWhatsAppTemplate(phoneNumber, resolveContentSid(template), values);
     if (!result.ok) {

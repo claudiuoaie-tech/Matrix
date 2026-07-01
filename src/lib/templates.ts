@@ -48,7 +48,7 @@ export const TEMPLATE_CATALOG: MessageTemplate[] = [
     defaultSid: "HX40c8840fa54cc3b4dfafc328cf598b46",
     variables: [
       { position: "1", label: "Worker name", sample: "James", source: "worker_name" },
-      { position: "2", label: "Date", sample: "Tue 8 July" },
+      { position: "2", label: "Date", sample: "08/07/2026" },
       { position: "3", label: "Shift type", sample: "Day shift" },
       { position: "4", label: "Start time", sample: "07:00" },
       { position: "5", label: "Location", sample: "FedEx Marston Gate" },
@@ -61,7 +61,7 @@ export const TEMPLATE_CATALOG: MessageTemplate[] = [
     defaultSid: "HXfd5a9d20bad000a9955f3d6afac5fddd",
     variables: [
       { position: "1", label: "Worker name", sample: "Lakshmi", source: "worker_name" },
-      { position: "2", label: "Date", sample: "Wed 9 July" },
+      { position: "2", label: "Date", sample: "09/07/2026" },
       { position: "3", label: "Shift type", sample: "Late shift" },
       { position: "4", label: "Location", sample: "FedEx Kingsbury" },
     ],
@@ -74,7 +74,7 @@ export const TEMPLATE_CATALOG: MessageTemplate[] = [
     variables: [
       { position: "1", label: "Worker name", sample: "Chris", source: "worker_name" },
       { position: "2", label: "Agency name", sample: "Fast Rec" },
-      { position: "3", label: "Week of", sample: "Mon 13 July" },
+      { position: "3", label: "Week of", sample: "13/07/2026" },
     ],
   },
   {
@@ -84,7 +84,7 @@ export const TEMPLATE_CATALOG: MessageTemplate[] = [
     defaultSid: "HX2d5a9267082195416d3d65845def7cc3",
     variables: [
       { position: "1", label: "Worker name", sample: "Aneta", source: "worker_name" },
-      { position: "2", label: "Date", sample: "Fri 10 July" },
+      { position: "2", label: "Date", sample: "10/07/2026" },
       { position: "3", label: "Location", sample: "Evri Bury St Edmunds" },
     ],
   },
@@ -95,7 +95,7 @@ export const TEMPLATE_CATALOG: MessageTemplate[] = [
     defaultSid: "HX6153c74dde591ffe2f4a9bec71423d76",
     variables: [
       { position: "1", label: "Worker name", sample: "James", source: "worker_name" },
-      { position: "2", label: "Date", sample: "Mon 13 July" },
+      { position: "2", label: "Date", sample: "13/07/2026" },
       { position: "3", label: "Start time", sample: "19:00" },
       { position: "4", label: "Location", sample: "FedEx Atherstone" },
     ],
@@ -130,10 +130,14 @@ export function templateCatalogForClient() {
 }
 
 /**
- * Resolve the positional variable map for ONE recipient in a bulk template send.
- *  - "worker_name" variables → the matched Worker's name when available, else the
- *    admin's typed override, else the sample (for unmatched manual numbers).
- *  - everything else → the admin's global override, else the sample.
+ * Resolve the positional variable map for ONE recipient in a template send.
+ *
+ * The admin's input is authoritative — we NEVER silently fall back to a catalog
+ * sample. If a field is cleared, an empty string is sent (the sample is only a
+ * UI pre-fill hint, never dispatched).
+ *  - "worker_name" variables → the matched Worker's name when available, else
+ *    whatever the admin typed (empty for an unmatched manual number).
+ *  - everything else → exactly what the admin typed (blank stays blank).
  * `overrides` is the position → value map typed once in the modal.
  */
 export function buildTemplateValues(
@@ -143,11 +147,13 @@ export function buildTemplateValues(
 ): Record<string, string> {
   const values: Record<string, string> = {};
   for (const v of template.variables) {
-    const typed = String(overrides?.[v.position] ?? "").trim();
+    const raw = overrides?.[v.position];
+    // Preserve the literal characters the admin typed (only null/undefined → "").
+    const typed = raw == null ? "" : String(raw);
     if (v.source === "worker_name") {
-      values[v.position] = (workerName ?? "").trim() || typed || v.sample;
+      values[v.position] = (workerName ?? "").trim() || typed;
     } else {
-      values[v.position] = typed || v.sample;
+      values[v.position] = typed;
     }
   }
   return values;
@@ -162,6 +168,9 @@ export function buildTemplatePreview(
   template: MessageTemplate,
   values: Record<string, string>
 ): string {
-  const parts = template.variables.map((v) => values[v.position] ?? v.sample);
-  return `[${template.displayName}] ${parts.join(" · ")}`;
+  // Reflect what was actually sent — skip blanks rather than backfilling samples.
+  const parts = template.variables
+    .map((v) => (values[v.position] ?? "").trim())
+    .filter((p) => p !== "");
+  return `[${template.displayName}]${parts.length ? " " + parts.join(" · ") : ""}`;
 }

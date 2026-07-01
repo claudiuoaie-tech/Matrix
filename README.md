@@ -59,9 +59,10 @@ npm run dev -- -p 3001      # frontend on :3001
 ```
 
 Open http://localhost:3001 and pick a view. The demo worker phone is
-`+15550001000` (OTP auto-filled in dev via `EXPOSE_OTP_IN_RESPONSE`). The admin
-console asks for the access key — the dev value is `dev-admin-key`
-(`ADMIN_API_KEY` in `.env`).
+`+15550001000`; the login code is sent by SMS only (in local dev without Twilio
+creds it's logged to the API server console — it is never returned to the
+browser). The admin console asks for the access key — the dev value is
+`dev-admin-key` (`ADMIN_API_KEY` in `.env`).
 
 ## Prerequisites
 

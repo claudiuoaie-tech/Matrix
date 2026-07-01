@@ -96,6 +96,29 @@ function isNegative(body: string): boolean {
   return /\b2\b/.test(body) || /\bno\b/i.test(body);
 }
 
+/**
+ * How far back a closed shift offer still counts as "recent" — long enough that a
+ * worker who replies "YES" a while after the offer lapsed still gets a helpful
+ * "that shift's gone" note rather than silence.
+ */
+const RECENT_OFFER_MS = 48 * 60 * 60 * 1000;
+
+/**
+ * Whether this worker has a recently-closed offer: an allocation that TIMED OUT
+ * (the offer expired, or the shift filled the moment they tried to take it)
+ * within the last 48h. Used to distinguish an explicit attempt to claim a shift
+ * that has since gone — the ONLY case we auto-reply about when there's no live
+ * proposal — from ordinary chatter we should just log quietly.
+ */
+async function hasRecentlyClosedOffer(workerId: string): Promise<boolean> {
+  const since = new Date(Date.now() - RECENT_OFFER_MS);
+  const closed = await prisma.allocation.findFirst({
+    where: { workerId, state: "TIMEOUT", updatedAt: { gte: since } },
+    select: { id: true },
+  });
+  return !!closed;
+}
+
 /** Build a TwiML response containing a single SMS reply and send it. */
 function replyTwiml(res: Response, message: string): void {
   const twiml = new MessagingResponse();
@@ -167,47 +190,56 @@ webhooksRouter.post(
         return;
       }
 
-      // 2. Find the most recent PROPOSED allocation for this worker.
+      // 2. Parse the reply. A message COUNTS as an accept if it contains "1" or
+      //    "YES", and as a decline if it contains "2" or "NO" (case-insensitive),
+      //    so "1", "yes please", "2 sorry", "no can do" all work.
+      const accept = isAffirmative(body);
+      const decline = isNegative(body);
+
+      // 3. Find the most recent PROPOSED allocation for this worker.
       const allocation = await prisma.allocation.findFirst({
         where: { workerId: worker.id, state: "PROPOSED" },
         orderBy: { updatedAt: "desc" },
         include: { shift: true },
       });
 
-      if (!allocation) {
+      // 4. There IS a live offer on the table → run the accept/decline flow.
+      if (allocation) {
+        if (accept && !decline) {
+          await handleAccept(res, allocation.id, allocation.shiftId);
+          return;
+        }
+        if (decline && !accept) {
+          await declineAllocation(allocation.id, allocation.shiftId);
+          replyTwiml(
+            res,
+            "Thanks for letting us know — we've recorded that you're not available for this shift. We'll keep you posted on future work."
+          );
+          return;
+        }
+        // An open offer but an ambiguous / contradictory reply — guide them to a
+        // clear answer (they're clearly responding to the offer).
         replyTwiml(
           res,
-          "We couldn't find an open shift offer for you right now. We'll be in touch when the next one comes up."
+          "Sorry, we didn't understand that. Reply 1 (or YES) to ACCEPT the offered shift, or 2 (or NO) to DECLINE."
         );
         return;
       }
 
-      // 3. Parse the reply. A message COUNTS as an accept if it contains "1" or
-      //    "YES", and as a decline if it contains "2" or "NO" (case-insensitive),
-      //    so "1", "yes please", "2 sorry", "no can do" all work.
-      const accept = isAffirmative(body);
-      const decline = isNegative(body);
-
-      if (accept && !decline) {
-        await handleAccept(res, allocation.id, allocation.shiftId);
-        return;
-      }
-
-      if (decline && !accept) {
-        await declineAllocation(allocation.id, allocation.shiftId);
+      // 5. NO live offer. Only auto-reply when the worker is explicitly trying to
+      //    CLAIM a shift that has since expired or been filled (an affirmative +
+      //    a recently-closed offer). Everything else — questions, "OK", "thanks",
+      //    a bare "YES" with no shift context — is already logged above and is
+      //    left to a human, with no canned auto-reply.
+      if (accept && !decline && (await hasRecentlyClosedOffer(worker.id))) {
         replyTwiml(
           res,
-          "Thanks for letting us know — we've recorded that you're not available for this shift. We'll keep you posted on future work."
+          "Sorry, that shift is no longer available — it's just been filled or the offer has expired. We'll be in touch with the next opportunity."
         );
         return;
       }
 
-      // Nothing matched, or the reply was contradictory (both yes and no) —
-      // guide the worker to a clear answer.
-      replyTwiml(
-        res,
-        "Sorry, we didn't understand that. Reply 1 (or YES) to ACCEPT the offered shift, or 2 (or NO) to DECLINE."
-      );
+      replyEmpty(res);
     } catch (err) {
       console.error("[twilio webhook] error:", err);
       // Avoid leaking internals; Twilio will treat a 500 as a failed delivery.

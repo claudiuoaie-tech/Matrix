@@ -1,6 +1,6 @@
 import { Router, Request, Response } from "express";
 import { prisma } from "../lib/prisma";
-import { sendSms } from "../lib/twilio";
+import { sendSms, toE164 } from "../lib/twilio";
 import {
   createSession,
   generateOtp,
@@ -10,13 +10,10 @@ import { adminAuthConfigured, isValidAdminKey } from "../lib/adminAuth";
 
 export const authRouter = Router();
 
-// In dev we surface the OTP in the API response so the frictionless login flow
-// can be demoed without a real handset. Never enable this in production.
-const EXPOSE_OTP =
-  (process.env.EXPOSE_OTP_IN_RESPONSE ?? "true").toLowerCase() !== "false";
-
+// Normalise every inbound phone to E.164 (the stored form), so "07…", "+44…"
+// and "0044…" all resolve to the same worker record.
 function normalisePhone(raw: string): string {
-  return raw.trim().replace(/\s+/g, "");
+  return toE164(raw);
 }
 
 /**
@@ -34,8 +31,11 @@ authRouter.post("/otp/request", async (req: Request, res: Response): Promise<voi
 
   const worker = await prisma.worker.findUnique({ where: { phone } });
 
-  // Only actually generate/send a code for a known, active worker.
-  let devCode: string | undefined;
+  // Only actually generate/send a code for a known, active worker. The code is
+  // delivered EXCLUSIVELY over SMS and is never returned in the API response —
+  // verification must be proven by a real handset, not by reading it off the
+  // wire. The response is a bare success boolean so it can't leak whether the
+  // number is registered either.
   if (worker && worker.status === "ACTIVE") {
     const code = generateOtp();
     await prisma.otpCode.create({
@@ -45,10 +45,9 @@ authRouter.post("/otp/request", async (req: Request, res: Response): Promise<voi
       phone,
       `Your Matrix login code is ${code}. It expires in 10 minutes.`
     );
-    if (EXPOSE_OTP) devCode = code;
   }
 
-  res.json({ ok: true, ...(devCode ? { devCode } : {}) });
+  res.json({ ok: true });
 });
 
 /**

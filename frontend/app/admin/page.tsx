@@ -206,6 +206,23 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
     }
   }, []);
 
+  // Mark one conversation read when the admin opens it. Optimistically clear the
+  // thread's unread rows + badge, then reconcile the count from the server.
+  const markThreadRead = useCallback(
+    async (phone: string) => {
+      setMessages((prev) =>
+        prev.map((m) => (m.fromNumber === phone && !m.isRead ? { ...m, isRead: true } : m))
+      );
+      try {
+        const { unread } = await admin.markThreadRead(phone);
+        setUnread(unread);
+      } catch {
+        // A failed sync isn't fatal — the next loadInbox will correct the badge.
+      }
+    },
+    []
+  );
+
   // Send an outbound reply and prepend it (newest-first) for instant feedback.
   // The server also emits message.received, so other admins refresh too.
   const replyToMessage = useCallback(
@@ -361,6 +378,7 @@ function AdminConsole({ onSignOut }: { onSignOut: () => void }) {
           loadingInbox={loadingInbox}
           marking={marking}
           onMarkAll={markAll}
+          onMarkThreadRead={markThreadRead}
           onReply={replyToMessage}
           onDelete={deleteMessage}
           onClearRead={clearReadHistory}

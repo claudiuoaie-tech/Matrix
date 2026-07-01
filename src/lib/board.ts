@@ -36,6 +36,15 @@ export function windowKeys(startKey: string, n = 14): string[] {
   return Array.from({ length: n }, (_, i) => ymdFromUTC(new Date(start + i * MS_DAY)));
 }
 
+/**
+ * Format a Date as DD/MM/YYYY (UK) for injection into outbound SMS/WhatsApp copy
+ * and approved Meta templates. Uses the UTC calendar date so it matches how shift
+ * dates are stored (@db.Date at UTC midnight) with no timezone drift.
+ */
+export function formatDateUk(d: Date): string {
+  return `${pad(d.getUTCDate())}/${pad(d.getUTCMonth() + 1)}/${d.getUTCFullYear()}`;
+}
+
 /** Split a stored full name into first / last parts for the board columns. */
 export function splitName(name: string): { firstName: string; lastName: string } {
   const parts = name.trim().split(/\s+/);

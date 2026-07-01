@@ -5,22 +5,12 @@ import { requireExternalApiKey } from "../lib/externalAuth";
 import { sendSms } from "../lib/twilio";
 import { isRtwExpired } from "../lib/rtw";
 import { emitRotaEvent } from "../lib/events";
-import { dateOnlyUTC, ymdFromUTC, splitName } from "../lib/board";
+import { dateOnlyUTC, ymdFromUTC, splitName, formatDateUk } from "../lib/board";
 
 export const externalRouter = Router();
 
 // Every route on this gateway requires the external API key (X-API-Key header).
 externalRouter.use(requireExternalApiKey);
-
-const SHORT_MONTHS = [
-  "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
-];
-
-/** "15-Jun" from a UTC-midnight Date (for SMS copy). */
-function dateLabelUTC(d: Date): string {
-  return `${d.getUTCDate()}-${SHORT_MONTHS[d.getUTCMonth()]}`;
-}
 
 /** Map a "HH:MM" start time to the coarse shift slot enum. */
 function slotFromTime(start: string): ShiftSlot {
@@ -126,7 +116,7 @@ externalRouter.post(
     }
 
     const date = dateOnlyUTC(shiftDate);
-    const dateLabel = dateLabelUTC(date);
+    const dateLabel = formatDateUk(date);
 
     // Current scheduled headcount for this client/day.
     const scheduled = await prisma.rotaCell.findMany({

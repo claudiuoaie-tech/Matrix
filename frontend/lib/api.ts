@@ -89,7 +89,9 @@ async function request<T>(
 
 export const auth = {
   requestOtp: (phone: string) =>
-    request<{ ok: boolean; devCode?: string }>("/api/auth/otp/request", {
+    // The OTP is delivered by SMS only; the response is a bare success flag and
+    // never carries the code.
+    request<{ ok: boolean }>("/api/auth/otp/request", {
       method: "POST",
       body: { phone },
     }),
@@ -273,6 +275,13 @@ export const admin = {
       method: "POST",
       admin: true,
     }),
+  // Mark a single conversation (by contact number) as read — fired when a thread
+  // is opened, so unread clears per-conversation without "Mark all read".
+  markThreadRead: (phone: string) =>
+    request<{ ok: boolean; updated: number; unread: number }>(
+      "/api/admin/messages/read-thread",
+      { method: "POST", admin: true, body: { phone } }
+    ),
   replyToMessage: (
     recipientPhone: string,
     messageBody: string,

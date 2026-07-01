@@ -69,6 +69,7 @@ export default function BroadcastEngine({
   loadingInbox,
   marking,
   onMarkAll,
+  onMarkThreadRead,
   onReply,
   onDelete,
   onClearRead,
@@ -84,6 +85,7 @@ export default function BroadcastEngine({
   loadingInbox: boolean;
   marking: boolean;
   onMarkAll: () => void;
+  onMarkThreadRead: (phone: string) => Promise<void>;
   onReply: (
     recipientPhone: string,
     body: string,
@@ -136,6 +138,7 @@ export default function BroadcastEngine({
           unread={unread}
           marking={marking}
           onMarkAll={onMarkAll}
+          onMarkThreadRead={onMarkThreadRead}
           onReply={onReply}
           onDelete={onDelete}
           onClearRead={onClearRead}
@@ -725,6 +728,7 @@ function InboxPane({
   unread,
   marking,
   onMarkAll,
+  onMarkThreadRead,
   onReply,
   onDelete,
   onClearRead,
@@ -740,6 +744,7 @@ function InboxPane({
   unread: number;
   marking: boolean;
   onMarkAll: () => void;
+  onMarkThreadRead: (phone: string) => Promise<void>;
   onReply: (
     recipientPhone: string,
     body: string,
@@ -872,6 +877,15 @@ function InboxPane({
   }
 
   const openThread = openPhone ? threads.find((t) => t.phone === openPhone) ?? null : null;
+
+  // Opening a conversation marks it read (per-thread, not the global "Mark all
+  // read"). Only fire when the open thread actually has unread rows; the guard
+  // stops it re-firing once the optimistic update flips unreadCount to 0.
+  useEffect(() => {
+    if (openThread && openThread.unreadCount > 0) {
+      void onMarkThreadRead(openThread.phone);
+    }
+  }, [openThread, onMarkThreadRead]);
 
   // ---- Conversation view -----------------------------------------------------
   if (openThread) {
@@ -1246,7 +1260,12 @@ function NewMessageModal({
   useEffect(() => {
     if (!activeTemplate) return;
     const seed: Record<string, string> = {};
-    for (const v of activeTemplate.variables) seed[v.position] = v.sample;
+    // The worker-name slot is personalised per recipient server-side, so leave it
+    // blank (it's only a fallback for unmatched manual numbers). Other fields
+    // pre-fill with their sample as an editable hint.
+    for (const v of activeTemplate.variables) {
+      seed[v.position] = v.source === "worker_name" ? "" : v.sample;
+    }
     setTemplateValues(seed);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTemplate?.key]);
@@ -1766,6 +1785,7 @@ function ConversationView({
       {templateOnly ? (
         <TemplateComposer
           phone={thread.phone}
+          workerName={thread.workerName}
           templates={templates}
           onSend={onSendTemplate}
         />
@@ -1833,10 +1853,12 @@ function ConversationView({
  */
 function TemplateComposer({
   phone,
+  workerName,
   templates,
   onSend,
 }: {
   phone: string;
+  workerName: string | null;
   templates: MessageTemplate[];
   onSend: (
     phoneNumber: string,
@@ -1851,14 +1873,18 @@ function TemplateComposer({
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Re-seed inputs whenever the selected template changes.
+  // Re-seed inputs whenever the selected template (or recipient) changes. The
+  // worker-name slot seeds with this contact's actual name when known (blank for
+  // an unknown number) — never a placeholder sample.
   useEffect(() => {
     if (!active) return;
     const seed: Record<string, string> = {};
-    for (const v of active.variables) seed[v.position] = v.sample;
+    for (const v of active.variables) {
+      seed[v.position] = v.source === "worker_name" ? workerName ?? "" : v.sample;
+    }
     setValues(seed);
     setError(null);
-  }, [active]);
+  }, [active, workerName]);
 
   async function send() {
     if (!active) return;
