@@ -4,7 +4,7 @@ import path from "path";
 import { randomUUID } from "crypto";
 import type { ClientPool, RotaStatus, DocType, MessageChannel } from "@prisma/client";
 import { prisma } from "../lib/prisma";
-import { sendSms, sendMessage, sendWhatsAppTemplate, toE164 } from "../lib/twilio";
+import { sendSms, sendWhatsApp, sendMessage, sendWhatsAppTemplate, toE164 } from "../lib/twilio";
 import {
   getTemplate,
   resolveContentSid,
@@ -108,6 +108,77 @@ function allocationSmsBody(
 }
 
 /**
+ * Default preferred channel from a raw (pre-normalisation) phone number. UK
+ * numbers → SMS; everything else → WHATSAPP (international workers who rely on
+ * WhatsApp). We normalise first so "07…", "+44…", "0044…" all read as UK.
+ */
+function defaultChannelForPhone(raw: string): MessageChannel {
+  return toE164(raw).startsWith("+44") ? "SMS" : "WHATSAPP";
+}
+
+/** Coerce a request value to a valid MessageChannel, or undefined if absent/invalid. */
+function parsePreferredChannel(raw: unknown): MessageChannel | undefined {
+  const v = String(raw ?? "").trim().toUpperCase();
+  return v === "SMS" || v === "WHATSAPP" ? (v as MessageChannel) : undefined;
+}
+
+/** Whether a phone currently has an open 24h WhatsApp customer-care window. */
+async function hasOpenWhatsappWindow(phone: string): Promise<boolean> {
+  const contact = await prisma.whatsappContact.findUnique({
+    where: { phone: toE164(phone) },
+    select: { windowExpiresAt: true },
+  });
+  return !!contact?.windowExpiresAt && contact.windowExpiresAt.getTime() > Date.now();
+}
+
+/**
+ * Dispatch the primary shift-allocation message on the worker's preferred channel
+ * (Channel Preference Hierarchy):
+ *  - SMS            → free-text SMS.
+ *  - WHATSAPP       → free-text WhatsApp when inside the 24h window; otherwise
+ *                     fall back to the approved "Shift Confirmation" Meta template
+ *                     via the Content API (so an out-of-session send never fails).
+ */
+async function dispatchAllocation(
+  worker: { name: string; phone: string; preferredChannel: MessageChannel },
+  startTime: string | null,
+  date: Date,
+  clientName: string
+): Promise<void> {
+  const firstName = splitName(worker.name).firstName;
+  const body = allocationSmsBody(firstName, startTime, date, clientName);
+
+  if (worker.preferredChannel !== "WHATSAPP") {
+    await sendSms(worker.phone, body);
+    return;
+  }
+
+  // WhatsApp-preferred: free-text only delivers inside the 24h window.
+  if (await hasOpenWhatsappWindow(worker.phone)) {
+    await sendWhatsApp(worker.phone, body);
+    return;
+  }
+
+  // Out of window (or no session yet) → approved template fallback. The Shift
+  // Confirmation template positions are: 1 Worker name, 2 Date, 3 Start time,
+  // 4 Location (client). Worker name personalises from the worker record.
+  const template = getTemplate("shift_confirmation");
+  if (template) {
+    const when = ymdFromUTC(date) === ymdFromUTC(new Date()) ? "today" : formatDateUk(date);
+    const values = buildTemplateValues(
+      template,
+      { "2": when, "3": startTime ?? "", "4": clientName },
+      worker.name
+    );
+    await sendWhatsAppTemplate(worker.phone, resolveContentSid(template), values);
+    return;
+  }
+
+  // No template configured — best-effort free-text WhatsApp rather than nothing.
+  await sendWhatsApp(worker.phone, body);
+}
+
+/**
  * Send the override SMS for one cell when the status warrants it. Looks the
  * worker up for their phone number. Returns true if a text was dispatched.
  */
@@ -152,9 +223,9 @@ async function notifyStatusOverride(
   const worker = await prisma.worker.findUnique({ where: { id: workerId } });
   if (!worker) return false;
 
-  let body: string;
   if (status === "SCHEDULED") {
-    // The allocation copy names the client, so resolve it from the cell.
+    // The allocation copy names the client, so resolve it from the cell, then
+    // dispatch on the worker's preferred channel (SMS / WhatsApp / template).
     let clientName = "";
     if (clientId) {
       const c = await prisma.client.findUnique({
@@ -163,14 +234,14 @@ async function notifyStatusOverride(
       });
       clientName = c?.companyName ?? "";
     }
-    body = allocationSmsBody(splitName(worker.name).firstName, startTime, date, clientName);
-  } else {
-    const generic = overrideSmsBody(status, date);
-    if (!generic) return false;
-    body = generic;
+    await dispatchAllocation(worker, startTime, date, clientName);
+    return true;
   }
 
-  await sendSms(worker.phone, body);
+  // Non-allocation status overrides keep the existing SMS behaviour.
+  const generic = overrideSmsBody(status, date);
+  if (!generic) return false;
+  await sendSms(worker.phone, generic);
   return true;
 }
 
@@ -347,12 +418,19 @@ adminRouter.post("/workers", async (req: Request, res: Response): Promise<void> 
   const rtwRaw = req.body?.rtwExpiryDate;
   const rtwExpiryDate = rtwRaw ? new Date(String(rtwRaw)) : null;
 
+  // Preferred channel: an explicit choice wins; otherwise default from the number
+  // (UK → SMS, international → WhatsApp).
+  const preferredChannel =
+    parsePreferredChannel(req.body?.preferredChannel) ??
+    defaultChannelForPhone(String(req.body?.phone ?? ""));
+
   const worker = await prisma.worker.create({
     data: {
       name,
       phone,
       email,
       clientPool: clientPool as ClientPool,
+      preferredChannel,
       rtwExpiryDate: rtwExpiryDate && !Number.isNaN(rtwExpiryDate.getTime()) ? rtwExpiryDate : null,
       skills: sanitizeSkills(req.body?.skills),
     },
@@ -380,6 +458,7 @@ adminRouter.put("/workers/:id", async (req: Request, res: Response): Promise<voi
     email?: string | null;
     clientPool?: ClientPool;
     status?: "ACTIVE" | "SUSPENDED" | "INACTIVE";
+    preferredChannel?: MessageChannel;
     rtwExpiryDate?: Date | null;
     skills?: string[];
   } = {};
@@ -403,6 +482,10 @@ adminRouter.put("/workers/:id", async (req: Request, res: Response): Promise<voi
   if (req.body?.clientPool != null && POOLS.includes(req.body.clientPool)) {
     data.clientPool = req.body.clientPool;
   }
+  // Preferred channel: an explicit valid value overrides; ignored otherwise so a
+  // blank/omitted field never clobbers the stored preference.
+  const chosenChannel = parsePreferredChannel(req.body?.preferredChannel);
+  if (chosenChannel) data.preferredChannel = chosenChannel;
   if (["ACTIVE", "SUSPENDED", "INACTIVE"].includes(String(req.body?.status))) {
     data.status = req.body.status;
   }
@@ -653,6 +736,8 @@ adminRouter.post("/workers/import", async (req: Request, res: Response): Promise
             phone,
             email: safeEmail,
             clientPool: "POOL_A",
+            // Default channel from the imported number (UK → SMS, else WhatsApp).
+            preferredChannel: defaultChannelForPhone(get(col.phone)),
             rtwExpiryDate: rtwDate,
             skills,
           },

@@ -14,6 +14,7 @@ import type {
   ImportSummary,
   InboxResponse,
   IncomingMessage,
+  MessageChannel,
   MessageTemplate,
   OutboundMedia,
   RecipientCandidate,
@@ -157,6 +158,7 @@ export const admin = {
     name: string;
     phone: string;
     clientPool: ClientPool;
+    preferredChannel?: MessageChannel;
     rtwExpiryDate?: string | null;
     skills?: string[];
     email?: string | null;
@@ -168,6 +170,7 @@ export const admin = {
       phone: string;
       clientPool: ClientPool;
       status: WorkerStatus;
+      preferredChannel: MessageChannel;
       rtwExpiryDate: string | null;
       skills: string[];
       email: string | null;

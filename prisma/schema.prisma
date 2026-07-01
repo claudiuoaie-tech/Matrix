@@ -106,6 +106,10 @@ model Worker {
   email         String?          @unique
   status        WorkerStatus     @default(ACTIVE)
   clientPool    ClientPool
+  // Preferred outbound channel for automated messaging. Defaults to SMS for UK
+  // numbers; non-UK numbers default to WHATSAPP (international workers who rely on
+  // WhatsApp). Admin-overridable from the worker profile.
+  preferredChannel MessageChannel @default(SMS)
   // Right to Work expiry. Null = not recorded. Past = expired (blocks shifts).
   rtwExpiryDate DateTime?
   // Free-text competencies (e.g. "Forklift", "Supervisor", "Driver") used to

@@ -17,6 +17,9 @@ export interface WorkerProfile {
   phone: string;
   status: WorkerStatus;
   clientPool: ClientPool;
+  // Preferred outbound channel for automated messaging (SMS default; WhatsApp for
+  // international workers). Admin-overridable from the worker profile.
+  preferredChannel?: MessageChannel;
   rtwExpiryDate?: string | null;
   skills?: string[];
   email?: string | null;

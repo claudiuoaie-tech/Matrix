@@ -26,12 +26,28 @@ import type {
   ClientPool,
   DocType,
   ImportSummary,
+  MessageChannel,
   WorkerDocument,
   WorkerStatus,
 } from "@/lib/types";
 import { POOL_LABELS } from "@/lib/ui";
 
 const POOLS: ClientPool[] = ["POOL_A", "POOL_B", "POOL_C"];
+
+/**
+ * Default messaging channel from a raw phone number — mirrors the backend
+ * (toE164().startsWith("+44")): UK numbers → SMS, international → WhatsApp. Used
+ * to seed the create form's channel dropdown before the admin overrides it.
+ */
+function channelForPhone(raw: string): MessageChannel {
+  const t = raw.trim().replace(/[\s()-]/g, "");
+  const uk =
+    t.startsWith("+44") ||
+    t.startsWith("0044") ||
+    t.startsWith("44") ||
+    (t.startsWith("0") && !t.startsWith("00"));
+  return uk ? "SMS" : "WHATSAPP";
+}
 
 // Canonical CSV header + a single example row to guide admins.
 const CSV_HEADERS = ["FirstName", "LastName", "PhoneNumber", "Email", "RTWExpiryDate", "Skills"];
@@ -627,6 +643,14 @@ function WorkerModal({
   const [pool, setPool] = useState<ClientPool>(worker?.clientPool ?? "POOL_A");
   const [rtw, setRtw] = useState(worker?.rtwExpiryDate ? worker.rtwExpiryDate.slice(0, 10) : "");
   const [skills, setSkills] = useState<string[]>(worker?.skills ?? []);
+  // Preferred messaging channel. For a NEW worker it tracks the phone-based
+  // default until the admin picks one; for an existing worker it seeds from the
+  // saved preference.
+  const [channel, setChannel] = useState<MessageChannel>(worker?.preferredChannel ?? "SMS");
+  const [channelTouched, setChannelTouched] = useState(false);
+  useEffect(() => {
+    if (!worker && !channelTouched) setChannel(channelForPhone(phone));
+  }, [phone, worker, channelTouched]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -641,6 +665,7 @@ function WorkerModal({
           phone,
           email: email.trim() || null,
           clientPool: pool,
+          preferredChannel: channel,
           rtwExpiryDate: rtw || null,
           skills,
         });
@@ -650,6 +675,7 @@ function WorkerModal({
           phone,
           email: email.trim() || null,
           clientPool: pool,
+          preferredChannel: channel,
           rtwExpiryDate: rtw || null,
           skills,
         });
@@ -714,6 +740,25 @@ function WorkerModal({
                 </option>
               ))}
             </select>
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-muted mb-1">
+              Preferred channel
+            </label>
+            <select
+              value={channel}
+              onChange={(e) => {
+                setChannel(e.target.value as MessageChannel);
+                setChannelTouched(true);
+              }}
+              className="w-full rounded-lg border border-border bg-white px-3 py-2 text-sm outline-none focus:border-brand"
+            >
+              <option value="SMS">SMS (UK numbers)</option>
+              <option value="WHATSAPP">WhatsApp (international)</option>
+            </select>
+            <p className="mt-1 text-[11px] text-muted">
+              Auto-set from the number; override for workers who rely on WhatsApp.
+            </p>
           </div>
           <div>
             <label className="block text-xs font-medium text-muted mb-1">
